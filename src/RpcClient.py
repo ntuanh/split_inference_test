@@ -36,10 +36,12 @@ class RpcClient:
             model_name = self.response["model_name"]
             num_layers = self.response["num_layers"]
             splits = self.response["splits"]
+            queue_name = self.response.get("queue_name", "intermediate_queue")
             batch_size = self.response["batch_size"]
             model = self.response["model"]
             data = self.response["data"]
             compress = self.response["compress"]
+            mode = self.response.get("mode", "split")
 
             if model is not None:
                 file_path = f'{model_name}.pt'
@@ -53,18 +55,37 @@ class RpcClient:
             else:
                 Log.print_with_color(f"Can't load model.", "yellow")
 
-            ckpt = torch.load("yolo26n.pt", map_location=self.device, weights_only=False)
+            ckpt = torch.load(f"{model_name}.pt", map_location=self.device, weights_only=False)
             model = ckpt["model"].to(self.device)
             model = model.float()
             layers = model.model
-            if self.layer_id == 1:
-                client = layers[:splits]
+            if mode == "only_edge":
+                if self.layer_id == 1:
+                    client = layers
+                else:
+                    client = None
+
+
+            elif mode == "only_cloud":
+
+                client = layers
+
             else:
-                client = layers[splits:]
+                if self.layer_id == 1:
+                    client = layers[:splits]
+                else:
+                    client = layers[splits:]
+
+            if mode == "only_edge" and self.layer_id != 1:
+                Log.print_with_color(
+                    "[Benchmark] only_edge mode: cloud client idle, skip inference",
+                    "yellow"
+                )
+                return False
 
             Log.print_with_color(f"Start Inference", "green")
 
-            self.inference_func(client, data, num_layers, splits, batch_size, self.logger, compress)
+            self.inference_func(client, data, num_layers, splits, batch_size, self.logger, compress, mode, queue_name)
 
             return False
         else:

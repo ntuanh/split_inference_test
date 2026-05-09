@@ -1,4 +1,5 @@
 import cv2
+import torch
 from torchvision.ops import nms
 
 save_yolo26 = [4,6,10,13,16,19,22]
@@ -22,35 +23,56 @@ def inference(model, x, y, cut):
             y.append(None)
     return x, y
 
-def postprocess_yolo(output, conf_thres=0.1, iou_thres=0.1):
-    pred_tensor = output[0]   # [B,N,6]
+def postprocess_yolo(output, conf_thres=0.1, iou_thres=0.5):
+    # yolo11/ultralytics: Detect trả về (pred[B,4+nc,N], features)
+    # yolo26/custom:      Detect trả về tensor [B,N,6]
+    if isinstance(output, (tuple, list)):
+        output = output[0]  # lấy pred tensor từ tuple
+
     batch_results = []
-    B = pred_tensor.shape[0]
+    B = output.shape[0]
 
-    for b in range(B):
-        pred = pred_tensor[b]      # [N,6]
+    # Phân biệt format: yolo26=[B,N,6], yolo11=[B,4+nc,N] (dim 1 > dim 2 usually)
+    if output.dim() == 3 and output.shape[1] != output.shape[2] and output.shape[2] == 6:
+        # yolo26 format: [B, N, 6] — (x1,y1,x2,y2, conf, cls_id) xyxy pixel
+        for b in range(B):
+            pred = output[b]           # [N, 6]
+            boxes  = pred[:, :4]
+            scores = pred[:, 4]
+            classes = pred[:, 5].long()
 
-        boxes = pred[:, :4]
-        scores = pred[:, 4]
-        classes = pred[:, 5].long()
+            mask = scores > conf_thres
+            boxes, scores, classes = boxes[mask], scores[mask], classes[mask]
 
-        mask = scores > conf_thres
+            if len(boxes):
+                keep = nms(boxes, scores, iou_thres)
+                boxes, scores, classes = boxes[keep], scores[keep], classes[keep]
 
-        boxes = boxes[mask]
-        scores = scores[mask]
-        classes = classes[mask]
+            batch_results.append({"boxes": boxes, "scores": scores, "classes": classes})
+    else:
+        # yolo11 format: [B, 4+nc, N] — box=(cx,cy,w,h) pixel, rest=class probs
+        pred_t = output.permute(0, 2, 1)   # [B, N, 4+nc]
+        for b in range(B):
+            pred = pred_t[b]               # [N, 4+nc]
+            boxes_xywh  = pred[:, :4]
+            class_probs = pred[:, 4:]
+            scores, classes = class_probs.max(dim=1)
 
-        keep = nms(boxes, scores, iou_thres)
+            mask = scores > conf_thres
+            boxes_xywh, scores, classes = boxes_xywh[mask], scores[mask], classes[mask]
 
-        boxes = boxes[keep]
-        scores = scores[keep]
-        classes = classes[keep]
+            # xywh → xyxy
+            x1 = boxes_xywh[:, 0] - boxes_xywh[:, 2] / 2
+            y1 = boxes_xywh[:, 1] - boxes_xywh[:, 3] / 2
+            x2 = boxes_xywh[:, 0] + boxes_xywh[:, 2] / 2
+            y2 = boxes_xywh[:, 1] + boxes_xywh[:, 3] / 2
+            boxes = torch.stack([x1, y1, x2, y2], dim=1)
 
-        batch_results.append({
-            "boxes": boxes,
-            "scores": scores,
-            "classes": classes
-        })
+            if len(boxes):
+                keep = nms(boxes, scores, iou_thres)
+                boxes, scores, classes = boxes[keep], scores[keep], classes[keep]
+
+            batch_results.append({"boxes": boxes, "scores": scores, "classes": classes})
 
     return batch_results
 

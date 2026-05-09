@@ -1,3 +1,4 @@
+import os
 import pika
 import uuid
 import argparse
@@ -41,12 +42,38 @@ logger = src.Log.Logger(f"./app.log" , config['debug-mode'])
 logger.log_info(f"Application start.")
 
 credentials = pika.PlainCredentials(username, password)
-connection = pika.BlockingConnection(pika.ConnectionParameters(address, 5672, f'{virtual_host}', credentials))
+connection = pika.BlockingConnection(
+    pika.ConnectionParameters(
+        host=address,
+        port=5672,
+        virtual_host=f"{virtual_host}",
+        credentials=credentials,
+        heartbeat=0,
+        blocked_connection_timeout=300
+    )
+)
 channel = connection.channel()
 
 if __name__ == "__main__":
     src.Log.print_with_color("[>>>] Client sending registration message to server...", "red")
-    data = {"action": "REGISTER", "client_id": client_id, "layer_id": args.layer_id, "message": "Hello from Client!"}
+
+    layer_times = None
+    model_name = config["server"]["model"]
+    if os.path.exists(f"{model_name}.pt"):
+        try:
+            from src.Profiler import profile_or_load
+            ckpt = torch.load(f"{model_name}.pt", map_location=device, weights_only=False)
+            model_obj = ckpt["model"].float().eval().to(device)
+            layer_times = profile_or_load(
+                model_name, model_obj, device,
+                batch_size=config["server"]["batch-size"]
+            ).tolist()
+            del model_obj, ckpt
+        except Exception as e:
+            src.Log.print_with_color(f"[Profile] Warning: {e}", "yellow")
+
+    data = {"action": "REGISTER", "client_id": client_id, "layer_id": args.layer_id,
+            "message": "Hello from Client!", "layer_times": layer_times}
     scheduler = Scheduler(client_id, args.layer_id, channel, device)
     logger.log_debug(f"client_id : {client_id} , stage {args.layer_id} , "
                      f"channel {channel} , device {device}")
