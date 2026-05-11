@@ -266,6 +266,91 @@ python client.py --layer_id 2
 
 ---
 
+# Metrics
+
+After each run, the system produces `metrics_pivoted.csv` with one row per batch. Below is a description of each column.
+
+---
+
+## Column Descriptions
+
+| Column | Description |
+|---|---|
+| `batch_id` | Row index in the CSV. When multiple devices run simultaneously, rows from all devices are interleaved into one file. |
+| `batch_size` | Number of frames processed together in one model forward pass. |
+| `best_cut` | Layer index chosen by the Hungarian algorithm to split the model. Edge runs layers from the start up to `best_cut`, cloud runs the remaining layers. |
+
+---
+
+## Latency
+
+Measured independently at each device using:
+```
+batch_start = time.perf_counter()   # immediately before processing
+# run assigned model layers, compress / decompress, send / receive
+batch_end   = time.perf_counter()
+
+latency_ms = (batch_end - batch_start) × 1000
+```
+
+- **edge_latency_ms** — total time for the edge device to process one batch: includes running its assigned model layers, compressing the feature map, and publishing the message to the queue.
+- **cloud_latency_ms** — total time for the cloud device to process one batch: includes receiving the message, decompressing the feature map, running its assigned model layers, and postprocessing the results.
+
+---
+
+## FPS
+
+Measured independently at each device using:
+```
+fps = batch_size / (batch_end - prev_batch_end)
+```
+
+`prev_batch_end` is the finish time of the previous batch on the same device, so FPS reflects how many frames that device completes per second between two consecutive batches. The first batch of every device always reports **0.0** because there is no previous batch to compare against.
+
+The **total system FPS** is the sum of the per-device average FPS across all final devices (cloud devices in split/only-cloud mode, edge devices in only-edge mode), since all final devices process frames in parallel. The first-batch **0.0** values are excluded from the per-device average so they do not distort the result.
+
+---
+
+## RAM
+
+```
+ram_mb = psutil.Process(os.getpid()).memory_info().rss / (1024 × 1024)
+```
+
+Reports the **Resident Set Size (RSS)** — physical RAM occupied by that process at the end of each batch. Does not include memory used by other processes on the same machine.
+
+---
+
+## Message Size
+
+Both values are measured on every batch.
+
+- **edge_message_size_bytes** — size in bytes of the pickle-serialized message measured by the edge immediately before publishing to RabbitMQ. When compression is enabled, the message contains the first frame in full (quantized) plus delta-encoded subsequent frames, so this value varies per batch depending on motion between frames within the batch. When compression is disabled, all frames are sent as raw tensors and the size is fixed.
+
+- **cloud_message_size_bytes** — size in bytes of the raw message received by the cloud from RabbitMQ. This is the same bytes as `edge_message_size_bytes` arriving on the receiving end, so the two columns reflect the same message and should be equal each batch.
+
+---
+
+## End-to-End Latency
+
+The edge embeds its processing start time inside every message it sends:
+```
+edge side : y = {"edge_start_time": batch_start, ...}
+
+cloud side: e2e_latency_ms = (cloud_batch_end - edge_start_time) × 1000
+```
+
+This captures the full pipeline latency for one batch:
+```
+e2e = edge_latency + queue_wait_time + cloud_latency
+```
+
+**Queue wait time** is the time a batch spends waiting inside the RabbitMQ intermediate queue before the cloud picks it up. If edge devices send faster than cloud devices can process, batches accumulate in the queue and each subsequent batch waits longer, causing e2e to grow over time. A growing e2e is a sign that the system is unbalanced at the chosen cut point.
+
+> **Note:** `batch_start` is recorded after all frames in the batch have been read from the video, so video I/O time is **not** included. E2E measures inference pipeline latency only.
+
+---
+
 # License
 
 See [LICENSE](./LICENSE)

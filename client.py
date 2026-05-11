@@ -16,7 +16,7 @@ parser.add_argument('--device', type=str, required=False, help='Device of client
 
 args = parser.parse_args()
 
-with open('config.yaml', 'r') as file:
+with open('config.yaml', 'r', encoding='utf-8') as file:
     config = yaml.safe_load(file)
 
 client_id = uuid.uuid4()
@@ -59,7 +59,8 @@ if __name__ == "__main__":
 
     layer_times = None
     model_name = config["server"]["model"]
-    if os.path.exists(f"{model_name}.pt"):
+    clustering_cfg = config.get("clustering", {})
+    if clustering_cfg.get("enable", False) and os.path.exists(f"{model_name}.pt"):
         try:
             from src.Profiler import profile_or_load
             ckpt = torch.load(f"{model_name}.pt", map_location=device, weights_only=False)
@@ -73,13 +74,16 @@ if __name__ == "__main__":
             src.Log.print_with_color(f"[Profile] Warning: {e}", "yellow")
 
     bandwidth_mb_s = None
-    clustering_cfg = config.get("clustering", {})
     if clustering_cfg.get("enable", False):
-        try:
-            from src.Profiler import measure_bandwidth
-            bandwidth_mb_s = measure_bandwidth(channel, str(client_id))
-        except Exception as e:
-            src.Log.print_with_color(f"[Bandwidth] Warning: {e}", "yellow")
+        if clustering_cfg.get("measure_bandwidth", True):
+            try:
+                from src.Profiler import measure_bandwidth
+                bandwidth_mb_s = measure_bandwidth(channel, str(client_id))
+            except Exception as e:
+                src.Log.print_with_color(f"[Bandwidth] Warning: {e}", "yellow")
+        else:
+            bandwidth_mb_s = float(clustering_cfg.get("network_rate_mb_s", 100.0))
+            src.Log.print_with_color(f"[Bandwidth] Using fixed rate from config: {bandwidth_mb_s} MB/s", "cyan")
 
     data = {"action": "REGISTER", "client_id": client_id, "layer_id": args.layer_id,
             "message": "Hello from Client!", "layer_times": layer_times,

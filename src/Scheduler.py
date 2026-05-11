@@ -86,8 +86,7 @@ class Scheduler:
             "action": "OUTPUT",
             "data": data
         })
-        if self.size_message is None:
-            self.size_message = len(message)
+        self.size_message = len(message)
 
 
         self.channel.basic_publish(
@@ -196,9 +195,9 @@ class Scheduler:
 
                 # ===== ONLY CLOUD =====
                 if mode == "only_cloud":
-
+                    frames_cpu = input_image.cpu()
                     y = {
-                        "data": input_image.cpu(),
+                        "data": [frames_cpu[i].clone() for i in range(len(frames_cpu))],
                         "width": width,
                         "height": height,
                         "edge_start_time": batch_start
@@ -456,18 +455,33 @@ class Scheduler:
             vals = [float(r[key]) for r in rows if r.get(key)]
             return round(sum(vals) / len(vals), 3) if vals else None
 
+        def total_fps(rows):
+            # Với mỗi device: tính trung bình FPS qua các batch
+            # Tổng hệ thống = cộng trung bình FPS của từng device
+            by_device = {}
+            for r in rows:
+                seq = r.get("device_seq")
+                val = r.get("fps")
+                if val and seq is not None:
+                    by_device.setdefault(seq, []).append(float(val))
+            device_avgs = [sum(v) / len(v) for v in by_device.values() if v]
+            return round(sum(device_avgs), 3) if device_avgs else None
+
         def mb(val):
             return round(val / 1024 / 1024, 3) if val is not None else "N/A"
 
         first_row = (edge_rows or cloud_rows)[0] if (edge_rows or cloud_rows) else {}
         cut = first_row.get("best_cut", "N/A")
+        all_rows = cloud_rows if cloud_rows else edge_rows
+        final_rows = cloud_rows if cloud_rows else edge_rows
+        system_fps = total_fps(final_rows)
         print("=" * 50)
         print(f"  SUMMARY  |  batches={n_rows}  cut={cut}")
         print("=" * 50)
-        all_rows = cloud_rows if cloud_rows else edge_rows
         print(f"  [EDGE]  latency={avg(edge_rows,'latency_ms')} ms  fps={avg(edge_rows,'fps')}  ram={avg(edge_rows,'ram_mb')} MB  msg={mb(avg(edge_rows,'message_size_bytes'))} MB")
         print(f"  [CLOUD] latency={avg(cloud_rows,'latency_ms')} ms  fps={avg(cloud_rows,'fps')}  ram={avg(cloud_rows,'ram_mb')} MB  msg={mb(avg(cloud_rows,'message_size_bytes'))} MB")
         print(f"  [E2E]   latency={avg(all_rows,'e2e_latency_ms')} ms")
+        print(f"  [SYSTEM TOTAL FPS] {system_fps} fps  (sum of avg fps across {len(set(r.get('device_seq') for r in final_rows))} final device(s))")
         print("=" * 50)
         Log.print_with_color(f"Saved metrics_pivoted.csv ({n_rows} batches)", "green")
         self._print_map()

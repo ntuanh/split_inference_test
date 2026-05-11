@@ -13,7 +13,7 @@ def profile_or_load(model_name: str, model, device: str,
     Returns np.array of shape (n_layers,) — mean seconds per layer per batch.
     Cache saved as profile_{model_name}_{device}.npy next to client.py.
     """
-    cache_path = f"profile_{model_name}_{device}.npy"
+    cache_path = f"profile_{model_name}_{device}_bs{batch_size}.npy"
 
     if os.path.exists(cache_path):
         times = np.load(cache_path)
