@@ -16,6 +16,8 @@ def inference(model, x, y, cut):
                 x = [y[input_yolo26[idx][0]], y[input_yolo26[idx][1]], y[input_yolo26[idx][2]]]
 
         x = layer(x)
+        if isinstance(x, tuple):
+            x = x[0]
 
         if idx in save_yolo26:
             y.append(x)

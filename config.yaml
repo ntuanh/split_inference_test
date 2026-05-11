@@ -2,8 +2,8 @@ name: YOLO
 server:
   cut-layer: a # or b, c, d
   clients:
-    - 1
-    - 1
+    - 9
+    - 3
   model: yolo11n
   batch-size: 4
 experiment:
@@ -24,10 +24,10 @@ compress:
   num_bit: 8
 
 clustering:
-  enable: False         # True → Hungarian tự chọn cut point; False → dùng cut-layer cố định
-  num_A: 1              # num_A + num_B + num_C = clients[0] (tổng edge)
-  num_B: 0
-  num_C: 0
-  num_cloud: 1          # = clients[1] (tổng cloud)
-  network_rate_mb_s: 1000.0  # fallback nếu không đo được bandwidth thực
-  max_clusters: 1       # <= min(clients[0], clients[1])
+  enable: True         # True → Hungarian tự chọn cut point; False → dùng cut-layer cố định
+  num_A: 3              # num_A + num_B + num_C = clients[0] (tổng edge)
+  num_B: 3
+  num_C: 3
+  num_cloud: 3          # = clients[1] (tổng cloud)
+  max_clusters: 20       # <= min(clients[0], clients[1])
+  network_rate_mb_s: 100.0     
