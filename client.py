@@ -60,7 +60,8 @@ if __name__ == "__main__":
     layer_times = None
     model_name = config["server"]["model"]
     clustering_cfg = config.get("clustering", {})
-    if clustering_cfg.get("enable", False) and os.path.exists(f"{model_name}.pt"):
+    use_real_profile = clustering_cfg.get("profile_source", "auto") != "simulated"
+    if clustering_cfg.get("enable", False) and use_real_profile and os.path.exists(f"{model_name}.pt"):
         try:
             from src.Profiler import profile_or_load
             ckpt = torch.load(f"{model_name}.pt", map_location=device, weights_only=False)
@@ -72,6 +73,8 @@ if __name__ == "__main__":
             del model_obj, ckpt
         except Exception as e:
             src.Log.print_with_color(f"[Profile] Warning: {e}", "yellow")
+    elif not use_real_profile:
+        src.Log.print_with_color("[Profile] Skipped (profile_source=simulated)", "yellow")
 
     bandwidth_mb_s = None
     if clustering_cfg.get("enable", False):
