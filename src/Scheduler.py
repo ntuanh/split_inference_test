@@ -24,7 +24,10 @@ class Scheduler:
             import glob as _glob
             for f in _glob.glob("metrics_raw_*.csv") + ["metrics_pivoted.csv", "metrics_pivot.lock"]:
                 if os.path.exists(f):
-                    os.remove(f)
+                    try:
+                        os.remove(f)
+                    except PermissionError:
+                        Log.print_with_color(f"[!] Cannot delete {f} (file is open). Close it and retry.", "red")
 
         self.size_message = None
         self.intermediate_queue = f"intermediate_queue"
@@ -38,7 +41,7 @@ class Scheduler:
         process = psutil.Process(os.getpid())
         return process.memory_info().rss / (1024 * 1024)
 
-    def write_metrics(self, mode, role, best_cut, batch_id, batch_size, latency_ms, fps, ram_mb, message_size_bytes=0, e2e_latency_ms=0):
+    def write_metrics(self, mode, role, best_cut, batch_id, batch_size, latency_ms, fps, ram_mb, message_size_bytes=0, e2e_latency_ms=0, edge_start_time=None):
         file_path = f"metrics_raw_{str(self.client_id).replace('-', '')}.csv"
         file_exists = os.path.exists(file_path)
 
@@ -56,7 +59,8 @@ class Scheduler:
                     "fps",
                     "ram_mb",
                     "message_size_bytes",
-                    "e2e_latency_ms"
+                    "e2e_latency_ms",
+                    "edge_start_time",
                 ])
 
             writer.writerow([
@@ -69,7 +73,8 @@ class Scheduler:
                 round(fps, 3),
                 round(ram_mb, 3),
                 message_size_bytes,
-                round(e2e_latency_ms, 3)
+                round(e2e_latency_ms, 3),
+                edge_start_time if edge_start_time is not None else "",
             ])
 
     def send_next_layer(self, intermediate_queue, data, compress):
@@ -252,7 +257,8 @@ class Scheduler:
                     fps=fps,
                     ram_mb=ram_mb,
                     message_size_bytes=msg_size,
-                    e2e_latency_ms=e2e_latency_ms
+                    e2e_latency_ms=e2e_latency_ms,
+                    edge_start_time=batch_start,
                 )
 
                 batch_id += 1
@@ -351,7 +357,8 @@ class Scheduler:
                     fps=fps,
                     ram_mb=ram_mb,
                     message_size_bytes=received_message_size,
-                    e2e_latency_ms=e2e_latency_ms
+                    e2e_latency_ms=e2e_latency_ms,
+                    edge_start_time=edge_start_time,
                 )
 
                 batch_id += 1
@@ -416,7 +423,28 @@ class Scheduler:
                     row["device_seq"] = cloud_seq_counter
                     cloud_rows.append(row)
 
-        n_rows = max(len(edge_rows), len(cloud_rows))
+        # Join edge ↔ cloud bằng edge_start_time (timestamp edge nhúng vào mỗi message)
+        edge_by_time = {
+            row["edge_start_time"]: row
+            for row in edge_rows
+            if row.get("edge_start_time")
+        }
+        matched_pairs = []
+        matched_edge_times = set()
+        for c in cloud_rows:
+            t = c.get("edge_start_time", "")
+            e = edge_by_time.get(t, {})
+            matched_pairs.append((e, c))
+            if t:
+                matched_edge_times.add(t)
+        # Edge rows không có cloud tương ứng (only_edge mode)
+        for e in edge_rows:
+            if e.get("edge_start_time", "") not in matched_edge_times:
+                matched_pairs.append((e, {}))
+        # Sắp xếp theo edge_start_time tăng dần
+        matched_pairs.sort(key=lambda p: float(p[0].get("edge_start_time") or p[1].get("edge_start_time") or 0))
+
+        n_rows = len(matched_pairs)
         fieldnames = [
             "batch_id", "batch_size", "best_cut",
             "edge_device", "edge_latency_ms", "edge_fps", "edge_ram_mb", "edge_message_size_bytes",
@@ -427,9 +455,7 @@ class Scheduler:
         with open(out_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            for i in range(n_rows):
-                e = edge_rows[i] if i < len(edge_rows) else {}
-                c = cloud_rows[i] if i < len(cloud_rows) else {}
+            for i, (e, c) in enumerate(matched_pairs):
                 writer.writerow({
                     "batch_id":                i,
                     "batch_size":              e.get("batch_size") or c.get("batch_size", ""),

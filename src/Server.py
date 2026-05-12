@@ -44,9 +44,12 @@ class Server:
         )
         self.channel = self.connection.channel()
         self.channel.queue_declare(queue='rpc_queue')
+        self.channel.queue_purge(queue='rpc_queue')
 
         self.register_clients = [0 for _ in range(len(self.total_clients))]
         self.list_clients = []
+        self.registered_ids = set()
+        self.notified = False
         self.count_clients = 0
         self.client_assignments = {}    # {client_id: {"splits": int, "queue_name": str}}
         self.client_profile_data = {}   # {client_id_str: np.array of per-layer times}
@@ -78,15 +81,19 @@ class Server:
             client_id = message["client_id"]
             layer_id = message["layer_id"]
 
-            if (str(client_id), layer_id) not in self.list_clients:
-                self.list_clients.append((str(client_id), layer_id))
-
             src.Log.print_with_color(f"[<<<] Received REGISTER from client {client_id} layer={layer_id}", "blue")
 
             if layer_id < 1 or layer_id > len(self.register_clients):
                 src.Log.print_with_color(
                     f"[!] Ignored client with unexpected layer_id={layer_id} (expected 1..{len(self.register_clients)})", "red")
                 return
+
+            if str(client_id) in self.registered_ids:
+                src.Log.print_with_color(f"[!] Duplicate REGISTER from {client_id}, ignored.", "yellow")
+                return
+
+            self.registered_ids.add(str(client_id))
+            self.list_clients.append((str(client_id), layer_id))
 
             layer_times = message.get("layer_times", None)
             if layer_times is not None:
@@ -103,7 +110,8 @@ class Server:
 
             self.register_clients[layer_id - 1] += 1
 
-            if self.register_clients == self.total_clients:
+            if self.register_clients == self.total_clients and not self.notified:
+                self.notified = True
                 src.Log.print_with_color("All clients connected. Sending notifications.", "green")
                 self.notify_clients()
 
@@ -263,9 +271,20 @@ class Server:
 
             with open(file_path, "rb") as f:
                 encoded = base64.b64encode(f.read()).decode('utf-8')
-            src.Log.print_with_color(f"Sending model {self.model_name} to all clients.", "green")
 
-            for (client_id, layer_id) in self.list_clients:
+            # Deduplicate list_clients trong trường hợp pika callback reentrant
+            seen_notify = set()
+            clients_to_notify = []
+            for entry in self.list_clients:
+                if entry[0] not in seen_notify:
+                    seen_notify.add(entry[0])
+                    clients_to_notify.append(entry)
+
+            src.Log.print_with_color(
+                f"Sending model {self.model_name} to {len(clients_to_notify)} clients "
+                f"(list_clients={len(self.list_clients)}).", "green")
+
+            for (client_id, layer_id) in clients_to_notify:
                 assignment = self.client_assignments.get(client_id, {})
                 response = {
                     "action":     "START",

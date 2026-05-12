@@ -2,7 +2,7 @@ name: YOLO
 server:
   cut-layer: a # or b, c, d
   clients:
-    - 9  #edge
+    - 9 #edge
     - 3 #cloud
   model: yolo11n
   batch-size: 4
@@ -29,7 +29,7 @@ clustering:
   num_B: 3
   num_C: 3
   num_cloud: 3         # = clients[1] (tổng cloud)
-  max_clusters: 3       # <= min(clients[0], clients[1])
+  max_clusters: 3      # <= min(clients[0], clients[1])
   network_rate_mb_s: 100.0
-  measure_bandwidth: True  # True → đo thực tế mỗi lần chạy; False → dùng network_rate_mb_s cố định
-  profile_source: real     # auto → dùng real nếu có, không thì simulated; real → ép dùng real; simulated → ép dùng giả lập
+  measure_bandwidth: False # True → đo thực tế mỗi lần chạy; False → dùng network_rate_mb_s cố định
+  profile_source: simulated     # auto → dùng real nếu có, không thì simulated; real → ép dùng real; simulated → ép dùng giả lập
