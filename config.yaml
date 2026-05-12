@@ -2,8 +2,8 @@ name: YOLO
 server:
   cut-layer: a # or b, c, d
   clients:
-    - 1  #edge
-    - 1 #cloud
+    - 9  #edge
+    - 3 #cloud
   model: yolo11n
   batch-size: 4
 experiment:
@@ -25,10 +25,11 @@ compress:
 
 clustering:
   enable: True         # True → Hungarian tự chọn cut point; False → dùng cut-layer cố định
-  num_A: 1              # num_A + num_B + num_C = clients[0] (tổng edge)
-  num_B: 0
-  num_C: 0
-  num_cloud: 1         # = clients[1] (tổng cloud)
+  num_A: 3              # num_A + num_B + num_C = clients[0] (tổng edge)
+  num_B: 3
+  num_C: 3
+  num_cloud: 3         # = clients[1] (tổng cloud)
   max_clusters: 3       # <= min(clients[0], clients[1])
   network_rate_mb_s: 100.0
   measure_bandwidth: True  # True → đo thực tế mỗi lần chạy; False → dùng network_rate_mb_s cố định
+  profile_source: simulated     # auto → dùng real nếu có, không thì simulated; real → ép dùng real; simulated → ép dùng giả lập

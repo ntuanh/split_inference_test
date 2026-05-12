@@ -147,12 +147,18 @@ class Server:
         ]
         n_edge = sum(1 for _, lid in self.list_clients if lid == 1)
         n_cloud = sum(1 for _, lid in self.list_clients if lid == len(self.total_clients))
-        use_real = (len(edge_times_list) == n_edge and len(cloud_times_list) == n_cloud
+        profile_source = cfg.get("profile_source", "auto")
+        has_real = (len(edge_times_list) == n_edge and len(cloud_times_list) == n_cloud
                     and n_edge > 0 and n_cloud > 0)
+
+        if profile_source == "real" and not has_real:
+            raise RuntimeError("[Clustering] profile_source=real nhưng chưa có đủ profiling từ clients")
+
+        use_real = has_real if profile_source == "auto" else (profile_source == "real")
 
         if use_real:
             src.Log.print_with_color(
-                f"[Clustering] Using REAL profiles ({n_edge} edge, {n_cloud} cloud)", "cyan")
+                f"[Clustering] Using REAL profiles ({n_edge} edge, {n_cloud} cloud) [profile_source={profile_source}]", "cyan")
             N = len(edge_times_list)
             M = len(cloud_times_list)
             edge_clients = [cid for cid, lid in self.list_clients
@@ -172,7 +178,7 @@ class Server:
             print_result(result, solver, title="HUNGARIAN MATCHING RESULT (real profiles)")
         else:
             src.Log.print_with_color(
-                "[Clustering] Using HARDCODED profiles (no profiling cache from clients yet)", "yellow")
+                f"[Clustering] Using SIMULATED profiles (DEVICE_A/B/C hardcoded) [profile_source={profile_source}]", "yellow")
             manual_cfg = ManualExperimentConfig(
                 num_A=cfg.get("num_A", 1),
                 num_B=cfg.get("num_B", 0),
