@@ -4,5 +4,8 @@ torchvision
 numpy
 requests~=2.32.3
 pyyaml
-cv2
+opencv-python
 ultralytics
+scipy
+psutil
+tqdm

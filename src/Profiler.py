@@ -86,6 +86,7 @@ def measure_bandwidth(channel, client_id: str,
 
     payload = os.urandom(int(payload_size_mb * 1024 * 1024))
 
+    timeout_s = 30.0
     samples = []
     for _ in range(runs):
         message = pickle.dumps({
@@ -100,6 +101,8 @@ def measure_bandwidth(channel, client_id: str,
             _, _, body = channel.basic_get(queue=reply_queue, auto_ack=True)
             if body:
                 break
+            if time.perf_counter() - t_start > timeout_s:
+                raise TimeoutError(f"Bandwidth measurement timed out after {timeout_s}s (server not responding)")
             time.sleep(0.005)
 
         elapsed = time.perf_counter() - t_start

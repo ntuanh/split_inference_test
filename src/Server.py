@@ -43,7 +43,7 @@ class Server:
             )
         )
         self.channel = self.connection.channel()
-        self.channel.queue_declare(queue='rpc_queue')
+        self.channel.queue_declare(queue='rpc_queue', durable=False)
         self.channel.queue_purge(queue='rpc_queue')
 
         self.register_clients = [0 for _ in range(len(self.total_clients))]
@@ -54,7 +54,6 @@ class Server:
         self.client_assignments = {}    # {client_id: {"splits": int, "queue_name": str}}
         self.client_profile_data = {}   # {client_id_str: np.array of per-layer times}
         self.client_bandwidth_data = {} # {client_id_str: float MB/s}
-
         self.channel.basic_qos(prefetch_count=1)
         self.reply_channel = self.connection.channel()
         self.channel.basic_consume(queue='rpc_queue', on_message_callback=self.on_request)
@@ -124,7 +123,9 @@ class Server:
             if self.count_clients == self.total_clients[0]:
                 self.logger.log_info("Stop Inference !!!")
                 self.notify_clients(start=False)
-                sys.exit()
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+                self.channel.stop_consuming()
+                return
 
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
@@ -136,6 +137,8 @@ class Server:
 
     def start(self):
         self.channel.start_consuming()
+        self.connection.close()
+        sys.exit(0)
 
     def _run_hungarian(self):
         cfg = self.config.get("clustering", {})
@@ -267,7 +270,8 @@ class Server:
             file_path = f"{self.model_name}.pt"
             if not os.path.exists(file_path):
                 src.Log.print_with_color(f"{self.model_name}.pt does not exist.", "yellow")
-                sys.exit()
+                self.connection.close()
+                sys.exit(1)
 
             with open(file_path, "rb") as f:
                 encoded = base64.b64encode(f.read()).decode('utf-8')
