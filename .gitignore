@@ -172,3 +172,13 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Machine-specific config (each machine has its own)
+config.yaml
+
+# Runtime files
+metrics_raw_*.csv
+metrics_pivoted.csv
+metrics_pivot.lock
+*.npy
+app.log
