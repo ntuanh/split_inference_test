@@ -33,13 +33,66 @@ DEVICE_CLOUD = np.array([
     0.001617, 0.000621, 0.0, 0.001959, 0.006564
 ], dtype=float)
 
-CUT_DATA_SIZES_MB = np.array([
-    13.78, 8.02, 20.5, 5.81, 9.61, 12.54, 12.38, 13.61, 13.71,
-    13.83, 13.52, 18.11, 17.89, 13.83, 26.1, 23.93, 9.94, 11.29,
-    10.87, 9.57, 10.27, 10.25, 9.42
-], dtype=float)
+CUT_DATA_SIZES_MB_BY_MODEL = {
+    
+    "yolo26n_bs32": np.array([
+        43.97, 22.76, 30.89, 12.04, 25.18, 31.6, 31.33, 34.18, 34.27, 34.34, 33.93, 44.32, 49.65, 40.29, 65.74, 88.87, 52.59, 55.39, 61.56, 58.23, 59.52, 62.02, 59.83
+    ], dtype=float),  # batch_size=32
+    "yolo26x_bs32": np.array([
+        245.24, 92.61, 197.92, 65.87, 119.46, 148.81, 151.63, 159.68, 159.07, 159.46, 158.35, 185.21, 211.14, 192.3, 328.09, 402.93, 261.99, 280.2, 313.62, 294.44, 302.45, 308.58, 300.3
+    ], dtype=float),  # batch_size=32
+    "yolo11x_bs32": np.array([
+        211.09, 94.66, 215.44, 69.23, 130.0, 161.9, 164.4, 172.97, 172.84, 171.98, 170.89, 196.88, 228.61, 204.84, 340.64, 439.95, 279.74, 298.59, 330.19, 313.12, 322.66, 329.11, 321.43
+    ], dtype=float),  # batch_size=32
+    "yolo11n_bs32": np.array([
+        45.41, 22.48, 31.13, 11.11, 24.92, 31.11, 31.01, 33.74, 34.01, 33.91, 33.84, 45.18, 49.94, 40.21, 65.67, 87.91, 53.12, 56.15, 62.46, 59.42, 60.89, 63.7, 61.97
+    ], dtype=float),  # batch_size=32
+    # Measured with batch_size=4, compress 8-bit, 640x640 input
+    # Run tools/measure_cut_sizes.py to get values for new models
+    "yolo26n": np.array([
+        13.78, 8.02, 20.5, 5.81, 9.61, 12.54, 12.38, 13.61, 13.71,
+        13.83, 13.52, 18.11, 17.89, 13.83, 26.1, 23.93, 9.94, 11.29,
+        10.87, 9.57, 10.27, 10.25, 9.42
+    ], dtype=float),
+    # yolo26x, yolo11n, yolo11x: run tools/measure_cut_sizes.py to measure
+}
+
+# Backward-compatible alias
+CUT_DATA_SIZES_MB = CUT_DATA_SIZES_MB_BY_MODEL["yolo26n"]
 
 RAW_INPUT_MB = 13.0
+
+
+def get_cut_data_sizes(model_name: str, batch_size: int = 4) -> np.ndarray:
+    """
+    Return CUT_DATA_SIZES_MB for the given model + batch_size.
+    Key format: "{model_name}_bs{batch_size}" (e.g. "yolo26x_bs32").
+    If exact key not found, auto-scales from a known batch size of the same model
+    (tensor sizes scale linearly with batch size).
+    """
+    import sys
+    key = f"{model_name}_bs{batch_size}"
+    if key in CUT_DATA_SIZES_MB_BY_MODEL:
+        return CUT_DATA_SIZES_MB_BY_MODEL[key]
+    # Auto-scale from same model, different batch size
+    for k, val in CUT_DATA_SIZES_MB_BY_MODEL.items():
+        if k.startswith(model_name + "_bs"):
+            known_bs = int(k.split("_bs")[1])
+            scale = batch_size / known_bs
+            scaled = val * scale
+            print(f"[Clustering] INFO: auto-scaled '{k}' × {scale:.3f} → '{key}'", file=sys.stderr)
+            return scaled
+    # Fallback: same model family (e.g. "yolo26n" for "yolo26x")
+    for k, val in CUT_DATA_SIZES_MB_BY_MODEL.items():
+        base = k.split("_bs")[0]
+        if len(model_name) == len(base) and model_name[:-1] == base[:-1]:
+            known_bs = int(k.split("_bs")[1]) if "_bs" in k else 4
+            scale = batch_size / known_bs
+            print(f"[Clustering] WARNING: no data for '{model_name}', approximating from '{base}' × {scale:.3f}.", file=sys.stderr)
+            return val * scale
+    print(f"[Clustering] WARNING: unknown model '{model_name}', falling back to yolo26n.", file=sys.stderr)
+    base_val = CUT_DATA_SIZES_MB_BY_MODEL.get("yolo26n", list(CUT_DATA_SIZES_MB_BY_MODEL.values())[0])
+    return base_val * (batch_size / 4)
 
 
 @dataclass

@@ -15,6 +15,7 @@ from src.Clustering import (
     RAW_INPUT_MB,
     run_manual_hungarian_case,
     print_result,
+    get_cut_data_sizes,
 )
 
 
@@ -181,7 +182,7 @@ class Server:
             solver = DeterministicSimilarityAssignmentSolver(
                 client_layer_times=np.vstack(edge_times_list),
                 server_layer_times=np.vstack(cloud_times_list),
-                cut_data_sizes=CUT_DATA_SIZES_MB,
+                cut_data_sizes=get_cut_data_sizes(self.model_name, self.batch_size),
                 input_data_size=RAW_INPUT_MB,
                 network_rates=rates_matrix,
             )

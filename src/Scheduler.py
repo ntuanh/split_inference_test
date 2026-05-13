@@ -164,7 +164,7 @@ class Scheduler:
                                    routing_key='rpc_queue',
                                    body=pickle.dumps(message))
 
-    def first_layer(self, model, data, batch_size, splits, logger, compress, mode="split"):
+    def first_layer(self, model, data, batch_size, splits, logger, compress, mode="split", save_set=None):
         orig_images = []
         input_image = []
         model.eval()
@@ -219,7 +219,7 @@ class Scheduler:
                 elif mode == "only_edge":
 
                     y = []
-                    x, y = inference(model, input_image, y, 0)
+                    x, y = inference(model, input_image, y, 0, save_set)
 
                     results = postprocess_yolo(x, conf_thres=0.01, iou_thres=0.5)
                     self._update_map(results, batch_id, batch_size)
@@ -228,7 +228,7 @@ class Scheduler:
                 else:
 
                     y = []
-                    x, y = inference(model, input_image, y, 0)
+                    x, y = inference(model, input_image, y, 0, save_set)
                     y[-1] = x
 
                     y = {
@@ -308,7 +308,7 @@ class Scheduler:
             time.sleep(0.5)
 
 
-    def last_layer(self, model, batch_size, splits, logger, compress, mode="split"):
+    def last_layer(self, model, batch_size, splits, logger, compress, mode="split", save_set=None):
         model.eval()
         model.to(self.device)
 
@@ -334,7 +334,7 @@ class Scheduler:
 
                     input_tensor = input_tensor.to(self.device)
 
-                    x, _ = inference(model, input_tensor, [], 0)
+                    x, _ = inference(model, input_tensor, [], 0, save_set)
                 # ===== SPLIT INFERENCE =====
                 else:
 
@@ -354,7 +354,7 @@ class Scheduler:
                     list_output = y["data"]
 
                     x = list_output[-1]
-                    x, _ = inference(model,x,list_output,splits)
+                    x, _ = inference(model, x, list_output, splits, save_set)
                 results = postprocess_yolo(x, conf_thres=0.01, iou_thres=0.5)
                 self._update_map(results, batch_id, batch_size)
 
@@ -556,17 +556,17 @@ class Scheduler:
         Log.print_with_color(f"Saved metrics_pivoted.csv ({n_rows} batches)", "green")
         self._print_map()
 
-    def inference_func(self, model, data, num_layers, splits, batch_size, logger, compress, mode="split", queue_name="intermediate_queue"):
+    def inference_func(self, model, data, num_layers, splits, batch_size, logger, compress, mode="split", queue_name="intermediate_queue", save_set=None):
         if queue_name != self.intermediate_queue:
             self.intermediate_queue = queue_name
             self.channel.queue_declare(self.intermediate_queue, durable=False)
 
         if self.layer_id == 1:
-            self.first_layer(model, data, batch_size, splits, logger, compress, mode)
+            self.first_layer(model, data, batch_size, splits, logger, compress, mode, save_set)
             if mode == "only_edge":
                 self._pivot_and_save()
         elif self.layer_id == num_layers:
-            self.last_layer(model, batch_size, splits, logger, compress, mode)
+            self.last_layer(model, batch_size, splits, logger, compress, mode, save_set)
             self._pivot_and_save()
         else:
             self.middle_layer(model)

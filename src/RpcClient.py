@@ -5,6 +5,7 @@ import os
 
 import torch
 import src.Log as Log
+from src.Model import get_save_set
 
 class RpcClient:
     def __init__(self, client_id, layer_id, channel, logger ,inference_func, device):
@@ -59,6 +60,7 @@ class RpcClient:
             model = ckpt["model"].to(self.device)
             model = model.float()
             layers = model.model
+            save_set = get_save_set(layers)  # None → yolo26 fallback, set → dynamic routing
             if mode == "only_edge":
                 if self.layer_id == 1:
                     client = layers
@@ -85,7 +87,7 @@ class RpcClient:
 
             Log.print_with_color(f"Start Inference", "green")
 
-            self.inference_func(client, data, num_layers, splits, batch_size, self.logger, compress, mode, queue_name)
+            self.inference_func(client, data, num_layers, splits, batch_size, self.logger, compress, mode, queue_name, save_set)
 
             return False
         else:

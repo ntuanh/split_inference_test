@@ -2,27 +2,64 @@ import cv2
 import torch
 from torchvision.ops import nms
 
-save_yolo26 = [4,6,10,13,16,19,22]
-input_yolo26 = [None,None,None,None,None,None,None,None,None,None,None,None,[-1,6],None,None,[-1,4],None,None
-    ,[-1,13],None,None,[-1,10],None,[16, 19, 22]]
+# Hardcoded routing for yolo26 models that don't carry layer.f attributes
+_SAVE_YOLO26 = {4, 6, 10, 13, 16, 19, 22}
+_INPUT_YOLO26 = [
+    None,None,None,None,None,None,None,None,None,None,None,None,
+    [-1,6],None,None,[-1,4],None,None,[-1,13],None,None,[-1,10],None,[16,19,22]
+]
 
-def inference(model, x, y, cut):
+
+def get_save_set(full_layers):
+    """
+    Derive which global layer indices must be saved for skip connections.
+    Returns a set of indices, or None if the model lacks layer.f attributes
+    (in which case the hardcoded yolo26 fallback will be used).
+    """
+    save = set()
+    for layer in full_layers:
+        f = getattr(layer, 'f', None)
+        if f is None:
+            return None  # model doesn't carry f — caller should use yolo26 fallback
+        if isinstance(f, (list, tuple)):
+            for fi in f:
+                if fi != -1:
+                    save.add(fi)
+        elif isinstance(f, int) and f != -1:
+            save.add(f)
+    return save
+
+
+def inference(model, x, y, cut, save_set=None):
+    """
+    Run model layers starting at global index `cut`.
+    save_set: set of global indices to save (from get_save_set).
+              None → fall back to hardcoded yolo26 routing.
+    """
     for i, layer in enumerate(model):
         idx = i + cut
-        if input_yolo26[idx] is not None:
-            if input_yolo26[idx][0] == -1:
-                x = [x, y[input_yolo26[idx][1]]]
-            else:
-                x = [y[input_yolo26[idx][0]], y[input_yolo26[idx][1]], y[input_yolo26[idx][2]]]
+        f = getattr(layer, 'f', None)
+
+        if f is not None:
+            # Ultralytics-style routing (yolo11, yolo26 built with ultralytics)
+            if isinstance(f, (list, tuple)):
+                x = [x if fi == -1 else y[fi] for fi in f]
+            elif isinstance(f, int) and f != -1:
+                x = y[f]
+        elif idx < len(_INPUT_YOLO26) and _INPUT_YOLO26[idx] is not None:
+            # Hardcoded yolo26 fallback
+            r = _INPUT_YOLO26[idx]
+            inputs = [x if r[0] == -1 else y[r[0]]]
+            inputs += [y[r[j]] for j in range(1, len(r))]
+            x = inputs
 
         x = layer(x)
         if isinstance(x, tuple):
             x = x[0]
 
-        if idx in save_yolo26:
-            y.append(x)
-        else:
-            y.append(None)
+        effective_save = save_set if save_set is not None else _SAVE_YOLO26
+        y.append(x if idx in effective_save else None)
+
     return x, y
 
 def postprocess_yolo(output, conf_thres=0.1, iou_thres=0.5):
