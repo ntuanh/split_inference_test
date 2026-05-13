@@ -550,13 +550,19 @@ class Scheduler:
         print("=" * 50)
         print(f"  SUMMARY  |  batches={n_rows} (valid={valid_batches})  cut={cut_str}")
         print("=" * 50)
-        print(f"  [EDGE]  latency={avg(edge_rows,'latency_ms',True)} ms  fps={avg(edge_rows,'fps',True)}  ram={avg(edge_rows,'ram_mb',True)} MB  msg={mb(avg(edge_rows,'message_size_bytes',True))} MB")
-        print(f"  [CLOUD] latency={avg(cloud_rows,'latency_ms',True)} ms  fps={avg(cloud_rows,'fps',True)}  ram={avg(cloud_rows,'ram_mb',True)} MB  msg={mb(avg(cloud_rows,'message_size_bytes',True))} MB")
+        print(f"  [EDGE]  latency={avg(edge_rows,'latency_ms',True)} ms  fps={avg(edge_rows,'fps',True)}  ram={avg(edge_rows,'ram_mb',True)} MB  msg={mb(avg(edge_rows,'message_size_bytes'))} MB")
+        print(f"  [CLOUD] latency={avg(cloud_rows,'latency_ms',True)} ms  fps={avg(cloud_rows,'fps',True)}  ram={avg(cloud_rows,'ram_mb',True)} MB  msg={mb(avg(cloud_rows,'message_size_bytes'))} MB")
         print(f"  [E2E]   latency={avg(all_rows,'e2e_latency_ms',True)} ms")
         print(f"  [SYSTEM TOTAL FPS] {system_fps} fps  (sum of avg fps across {len(set(r.get('device_seq') for r in final_rows))} final device(s))")
         print("=" * 50)
         Log.print_with_color(f"Saved metrics_pivoted.csv ({n_rows} batches)", "green")
-        self._print_map()
+        n_edge_devices = len(set(r.get("device_seq") for r in edge_rows))
+        if n_edge_devices > 1:
+            Log.print_with_color(
+                f"[mAP] Skipped: {n_edge_devices} edge devices in this cluster — "
+                f"frame alignment undefined for multi-edge mAP.", "yellow")
+        else:
+            self._print_map()
 
     def inference_func(self, model, data, num_layers, splits, batch_size, logger, compress, mode="split", queue_name="intermediate_queue", save_set=None):
         if queue_name != self.intermediate_queue:
