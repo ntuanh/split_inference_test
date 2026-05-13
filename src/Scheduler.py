@@ -274,16 +274,17 @@ class Scheduler:
         cap.release()
         pbar.close()
 
-        # Gửi metrics CSV lên cloud để cloud tổng hợp
+        # Gửi metrics CSV lên cloud để cloud tổng hợp (dùng queue riêng theo cluster)
         metrics_file = f"metrics_raw_{str(self.client_id).replace('-', '')}.csv"
         if os.path.exists(metrics_file):
             try:
                 with open(metrics_file, 'rb') as f:
                     metrics_data = f.read()
-                self.channel.queue_declare("metrics_sync_queue", durable=False)
+                metrics_sync_q = f"metrics_sync_{self.intermediate_queue}"
+                self.channel.queue_declare(metrics_sync_q, durable=False)
                 self.channel.basic_publish(
                     exchange='',
-                    routing_key="metrics_sync_queue",
+                    routing_key=metrics_sync_q,
                     body=pickle.dumps({"action": "METRICS", "filename": os.path.basename(metrics_file), "data": metrics_data})
                 )
                 Log.print_with_color(f"[Metrics] Sent local metrics to cloud ({len(metrics_data)} bytes)", "cyan")
@@ -418,11 +419,12 @@ class Scheduler:
         # Đợi các client còn lại ghi xong hàng cuối
         time.sleep(2.0)
 
-        # Thu thập metrics CSV từ các máy edge qua RabbitMQ
+        # Thu thập metrics CSV từ các máy edge qua RabbitMQ (queue riêng theo cluster)
         try:
-            self.channel.queue_declare("metrics_sync_queue", durable=False)
+            metrics_sync_q = f"metrics_sync_{self.intermediate_queue}"
+            self.channel.queue_declare(metrics_sync_q, durable=False)
             while True:
-                method_frame, _, body = self.channel.basic_get(queue="metrics_sync_queue", auto_ack=True)
+                method_frame, _, body = self.channel.basic_get(queue=metrics_sync_q, auto_ack=True)
                 if not method_frame:
                     break
                 msg = pickle.loads(body)
