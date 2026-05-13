@@ -32,6 +32,7 @@ class Scheduler:
         self.size_message = None
         self.intermediate_queue = f"intermediate_queue"
         self.channel.queue_declare(self.intermediate_queue, durable=False)
+        self._my_metrics_queue = None  # set by _setup_metrics_fanout_queue
 
         self.map_metric = None
         self.gt_dict = {}
@@ -76,6 +77,20 @@ class Scheduler:
                 round(e2e_latency_ms, 3),
                 edge_start_time if edge_start_time is not None else "",
             ])
+
+    def _setup_metrics_fanout_queue(self):
+        """Cloud client gọi trước khi inference: tạo queue riêng bind vào fanout exchange.
+        Mỗi cloud nhận một bản copy metrics từ tất cả edge trong cluster."""
+        exchange = f"metrics_fanout_{self.intermediate_queue}"
+        my_queue = f"mfq_{str(self.client_id).replace('-', '')}"
+        try:
+            self.channel.exchange_declare(exchange=exchange, exchange_type='fanout', durable=False)
+            self.channel.queue_declare(my_queue, durable=False)
+            self.channel.queue_bind(queue=my_queue, exchange=exchange)
+            self._my_metrics_queue = my_queue
+        except Exception as e:
+            Log.print_with_color(f"[Metrics] Fanout setup failed: {e}", "yellow")
+            self._my_metrics_queue = None
 
     def send_next_layer(self, intermediate_queue, data, compress):
 
@@ -274,20 +289,20 @@ class Scheduler:
         cap.release()
         pbar.close()
 
-        # Gửi metrics CSV lên cloud để cloud tổng hợp (dùng queue riêng theo cluster)
+        # Broadcast metrics CSV lên tất cả cloud trong cluster qua fanout exchange
         metrics_file = f"metrics_raw_{str(self.client_id).replace('-', '')}.csv"
         if os.path.exists(metrics_file):
             try:
                 with open(metrics_file, 'rb') as f:
                     metrics_data = f.read()
-                metrics_sync_q = f"metrics_sync_{self.intermediate_queue}"
-                self.channel.queue_declare(metrics_sync_q, durable=False)
+                exchange = f"metrics_fanout_{self.intermediate_queue}"
+                self.channel.exchange_declare(exchange=exchange, exchange_type='fanout', durable=False)
                 self.channel.basic_publish(
-                    exchange='',
-                    routing_key=metrics_sync_q,
+                    exchange=exchange,
+                    routing_key='',
                     body=pickle.dumps({"action": "METRICS", "filename": os.path.basename(metrics_file), "data": metrics_data})
                 )
-                Log.print_with_color(f"[Metrics] Sent local metrics to cloud ({len(metrics_data)} bytes)", "cyan")
+                Log.print_with_color(f"[Metrics] Broadcast metrics via fanout ({len(metrics_data)} bytes)", "cyan")
             except Exception as e:
                 Log.print_with_color(f"[Metrics] Failed to send metrics: {e}", "yellow")
 
@@ -419,22 +434,22 @@ class Scheduler:
         # Đợi các client còn lại ghi xong hàng cuối
         time.sleep(2.0)
 
-        # Thu thập metrics CSV từ các máy edge qua RabbitMQ (queue riêng theo cluster)
-        try:
-            metrics_sync_q = f"metrics_sync_{self.intermediate_queue}"
-            self.channel.queue_declare(metrics_sync_q, durable=False)
-            while True:
-                method_frame, _, body = self.channel.basic_get(queue=metrics_sync_q, auto_ack=True)
-                if not method_frame:
-                    break
-                msg = pickle.loads(body)
-                if msg.get("action") == "METRICS":
-                    fname = msg["filename"]
-                    with open(fname, 'wb') as f:
-                        f.write(msg["data"])
-                    Log.print_with_color(f"[Metrics] Received remote metrics: {fname}", "cyan")
-        except Exception as e:
-            Log.print_with_color(f"[Metrics] Warning collecting remote metrics: {e}", "yellow")
+        # Thu thập metrics CSV từ personal fanout queue (mỗi cloud có bản copy riêng)
+        my_q = self._my_metrics_queue
+        if my_q:
+            try:
+                while True:
+                    method_frame, _, body = self.channel.basic_get(queue=my_q, auto_ack=True)
+                    if not method_frame:
+                        break
+                    msg = pickle.loads(body)
+                    if msg.get("action") == "METRICS":
+                        fname = msg["filename"]
+                        with open(fname, 'wb') as f:
+                            f.write(msg["data"])
+                        Log.print_with_color(f"[Metrics] Received remote metrics: {fname}", "cyan")
+            except Exception as e:
+                Log.print_with_color(f"[Metrics] Warning collecting remote metrics: {e}", "yellow")
 
         edge_rows = []
         cloud_rows = []
@@ -574,6 +589,7 @@ class Scheduler:
             if mode == "only_edge":
                 self._pivot_and_save()
         elif self.layer_id == num_layers:
+            self._setup_metrics_fanout_queue()
             self.last_layer(model, batch_size, splits, logger, compress, mode, save_set)
             self._pivot_and_save()
         else:
