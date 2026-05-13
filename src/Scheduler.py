@@ -221,7 +221,7 @@ class Scheduler:
                     y = []
                     x, y = inference(model, input_image, y, 0, save_set)
 
-                    results = postprocess_yolo(x, conf_thres=0.01, iou_thres=0.5)
+                    results = postprocess_yolo(x, conf_thres=0.25, iou_thres=0.5)
                     self._update_map(results, batch_id, batch_size)
 
                 # ===== SPLIT INFERENCE =====
@@ -355,7 +355,7 @@ class Scheduler:
 
                     x = list_output[-1]
                     x, _ = inference(model, x, list_output, splits, save_set)
-                results = postprocess_yolo(x, conf_thres=0.01, iou_thres=0.5)
+                results = postprocess_yolo(x, conf_thres=0.25, iou_thres=0.5)
                 self._update_map(results, batch_id, batch_size)
 
                 batch_end = time.perf_counter()
