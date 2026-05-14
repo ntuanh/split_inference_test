@@ -16,6 +16,7 @@ from src.Clustering import (
     run_manual_hungarian_case,
     print_result,
     get_cut_data_sizes,
+    get_raw_input_mb,
 )
 
 
@@ -183,7 +184,7 @@ class Server:
                 client_layer_times=np.vstack(edge_times_list),
                 server_layer_times=np.vstack(cloud_times_list),
                 cut_data_sizes=get_cut_data_sizes(self.model_name, self.batch_size),
-                input_data_size=RAW_INPUT_MB,
+                input_data_size=get_raw_input_mb(self.batch_size),
                 network_rates=rates_matrix,
             )
             result = solver.solve_best_over_k("hungarian", max_clusters=max_clusters)["best_result"]
@@ -199,6 +200,9 @@ class Server:
                 network_rate_mb_s=network_rate,
                 max_clusters=max_clusters,
                 exact_max_k=max_clusters,
+                model_name=self.model_name,
+                batch_size=self.batch_size,
+                input_data_mb=get_raw_input_mb(self.batch_size),
             )
             results = run_manual_hungarian_case(manual_cfg)
             solver = results["solver"]

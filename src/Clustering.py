@@ -72,7 +72,11 @@ CUT_DATA_SIZES_MB_BY_MODEL = {
 # Backward-compatible alias
 CUT_DATA_SIZES_MB = CUT_DATA_SIZES_MB_BY_MODEL["yolo26n"]
 
-RAW_INPUT_MB = 13.0
+RAW_INPUT_MB = 13.0  # base value for batch_size=4, 8-bit compressed, 640x640x3
+
+
+def get_raw_input_mb(batch_size: int = 4) -> float:
+    return RAW_INPUT_MB * (batch_size / 4)
 
 
 def get_cut_data_sizes(model_name: str, batch_size: int = 4) -> np.ndarray:
@@ -118,6 +122,8 @@ class ScenarioConfig:
     input_data_mb: float = RAW_INPUT_MB
     edge_time_jitter: float = 0.0
     cloud_time_jitter: float = 0.0
+    model_name: str = "yolo26n"
+    batch_size: int = 4
 
 
 @dataclass
@@ -166,6 +172,8 @@ class ManualExperimentConfig:
     max_clusters: Optional[int] = None
     cluster_penalty: float = 0.0
     exact_max_k: int = 7
+    model_name: str = "yolo26n"
+    batch_size: int = 4
 
 
 class ScenarioSampler:
@@ -276,7 +284,7 @@ def build_scenario_from_config(config: ScenarioConfig, rng: np.random.Generator)
     solver = DeterministicSimilarityAssignmentSolver(
         client_layer_times=client_layer_times,
         server_layer_times=server_layer_times,
-        cut_data_sizes=CUT_DATA_SIZES_MB,
+        cut_data_sizes=get_cut_data_sizes(config.model_name, config.batch_size),
         input_data_size=config.input_data_mb,
         network_rates=network_rates,
         network_overheads=network_overheads,
@@ -735,7 +743,7 @@ def build_manual_scenario(config: ManualExperimentConfig, seed: int = 0):
     solver = DeterministicSimilarityAssignmentSolver(
         client_layer_times=client_layer_times,
         server_layer_times=server_layer_times,
-        cut_data_sizes=CUT_DATA_SIZES_MB,
+        cut_data_sizes=get_cut_data_sizes(config.model_name, config.batch_size),
         input_data_size=config.input_data_mb,
         network_rates=network_rates,
         network_overheads=network_overheads,
