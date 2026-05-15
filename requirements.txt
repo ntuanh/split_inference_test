@@ -5,7 +5,7 @@ numpy
 requests~=2.32.3
 pyyaml
 opencv-python
-ultralytics
+ultralytics==8.4.23
 scipy
 psutil
 tqdm
