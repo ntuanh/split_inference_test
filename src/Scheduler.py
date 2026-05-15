@@ -20,14 +20,13 @@ class Scheduler:
         self.channel = channel
         self.device = device
 
-        if self.layer_id == 1:
-            import glob as _glob
-            for f in _glob.glob("metrics_raw_*.csv") + ["metrics_pivoted.csv", "metrics_pivot.lock"]:
-                if os.path.exists(f):
-                    try:
-                        os.remove(f)
-                    except PermissionError:
-                        Log.print_with_color(f"[!] Cannot delete {f} (file is open). Close it and retry.", "red")
+        import glob as _glob
+        for f in _glob.glob("metrics_raw_*.csv") + ["metrics_pivoted.csv", "metrics_pivot.lock"]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except PermissionError:
+                    Log.print_with_color(f"[!] Cannot delete {f} (file is open). Close it and retry.", "red")
 
         self.size_message = None
         self.intermediate_queue = f"intermediate_queue"
