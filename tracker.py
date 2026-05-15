@@ -12,6 +12,7 @@ Usage:
     python tracker.py --stream detections_stream.jsonl
     python tracker.py --detections detections.json --mode post
 """
+import os
 import cv2
 import json
 import time
@@ -79,6 +80,9 @@ if args.mode == "realtime":
     timeout = 30       # giây không có data mới (sau khi inference đã bắt đầu) thì dừng
     received_any = False
     last_data_time = None
+
+    if os.path.exists(args.stream):
+        os.remove(args.stream)
 
     print("[Tracker] Waiting for inference to start ...")
 
