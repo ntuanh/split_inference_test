@@ -150,9 +150,10 @@ class Scheduler:
         Log.print_with_color(f"[mAP] Loaded GT for {len(self.gt_dict)} frames from '{gt_dir}'", "green")
 
     def _update_map(self, batch_results, batch_id, batch_size):
+        import json
         for img_idx, r in enumerate(batch_results):
             frame_num = batch_id * batch_size + img_idx + 1
-            self._det_results[frame_num] = [
+            dets = [
                 {
                     "box":   r["boxes"][i].cpu().tolist(),
                     "score": round(float(r["scores"][i]), 4),
@@ -160,6 +161,9 @@ class Scheduler:
                 }
                 for i in range(len(r["boxes"]))
             ]
+            self._det_results[frame_num] = dets
+            with open("detections_stream.jsonl", "a") as f:
+                f.write(json.dumps({"frame": frame_num, "dets": dets}) + "\n")
             if self.map_metric is None or frame_num not in self.gt_dict:
                 continue
             self.map_metric.update(
@@ -601,6 +605,8 @@ class Scheduler:
             self._write_detections_json()
 
     def inference_func(self, model, data, num_layers, splits, batch_size, logger, compress, mode="split", queue_name="intermediate_queue", save_set=None):
+        if os.path.exists("detections_stream.jsonl"):
+            os.remove("detections_stream.jsonl")
         if queue_name != self.intermediate_queue:
             self.intermediate_queue = queue_name
             self.channel.queue_declare(self.intermediate_queue, durable=False)
