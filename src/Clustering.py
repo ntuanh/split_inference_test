@@ -93,9 +93,6 @@ CUT_DATA_SIZES_MB_BY_MODEL = {
     # yolo26x, yolo11n, yolo11x: run tools/measure_cut_sizes.py to measure
 }
 
-# Backward-compatible alias
-CUT_DATA_SIZES_MB = CUT_DATA_SIZES_MB_BY_MODEL["yolo26n"]
-
 RAW_INPUT_MB = 13.0  # base value for batch_size=4, 8-bit compressed, 640x640x3
 
 

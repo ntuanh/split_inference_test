@@ -11,8 +11,6 @@ from ultralytics import YOLO
 from src.Clustering import (
     ManualExperimentConfig,
     DeterministicSimilarityAssignmentSolver,
-    CUT_DATA_SIZES_MB,
-    RAW_INPUT_MB,
     run_manual_hungarian_case,
     print_result,
     get_cut_data_sizes,
