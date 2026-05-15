@@ -562,10 +562,14 @@ class Scheduler:
         final_rows = cloud_rows if cloud_rows else edge_rows
         system_fps = total_fps(final_rows)
         valid_batches = len([r for r in final_rows if float(r.get("fps") or 0) > 0])
+        # Edge metrics chỉ tính trên batch có cloud match (batch kia tính ở cloud kia)
+        # Fallback về tất cả edge_rows nếu không có cloud (only_edge mode)
+        matched_edge_rows = [e for e, c in matched_pairs if c and e]
+        summary_edge_rows = matched_edge_rows if cloud_rows else edge_rows
         print("=" * 50)
         print(f"  SUMMARY  |  batches={n_rows} (valid={valid_batches})  cut={cut_str}")
         print("=" * 50)
-        print(f"  [EDGE]  latency={avg(edge_rows,'latency_ms',True)} ms  fps={avg(edge_rows,'fps',True)}  ram={avg(edge_rows,'ram_mb',True)} MB  msg={mb(avg(edge_rows,'message_size_bytes'))} MB")
+        print(f"  [EDGE]  latency={avg(summary_edge_rows,'latency_ms',True)} ms  fps={avg(summary_edge_rows,'fps',True)}  ram={avg(summary_edge_rows,'ram_mb',True)} MB  msg={mb(avg(summary_edge_rows,'message_size_bytes'))} MB")
         print(f"  [CLOUD] latency={avg(cloud_rows,'latency_ms',True)} ms  fps={avg(cloud_rows,'fps',True)}  ram={avg(cloud_rows,'ram_mb',True)} MB  msg={mb(avg(cloud_rows,'message_size_bytes'))} MB")
         print(f"  [E2E]   latency={avg(all_rows,'e2e_latency_ms',True)} ms")
         print(f"  [SYSTEM TOTAL FPS] {system_fps} fps  (sum of avg fps across {len(set(r.get('device_seq') for r in final_rows))} final device(s))")
