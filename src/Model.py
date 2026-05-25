@@ -62,7 +62,7 @@ def inference(model, x, y, cut, save_set=None):
 
     return x, y
 
-def postprocess_yolo(output, conf_thres=0.1, iou_thres=0.5):
+def postprocess_yolo(output, conf_thres=0.25, iou_thres=0.5):
     # yolo11/ultralytics: Detect trả về (pred[B,4+nc,N], features)
     # yolo26/custom:      Detect trả về tensor [B,N,6]
     if isinstance(output, (tuple, list)):
