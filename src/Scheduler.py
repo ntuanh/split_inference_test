@@ -288,7 +288,7 @@ class Scheduler:
                 self.write_metrics(
                     mode=mode,
                     role="edge_sender" if mode == "only_cloud" else "edge",
-                    best_cut="N/A" if splits is None else splits - 1,
+                    best_cut="N/A" if splits is None else splits,
                     batch_id=batch_id,
                     batch_size=batch_size,
                     latency_ms=latency_ms,
@@ -407,7 +407,7 @@ class Scheduler:
                 self.write_metrics(
                     mode=mode,
                     role="cloud",
-                    best_cut="N/A" if splits is None else splits - 1,
+                    best_cut="N/A" if splits is None else splits,
                     batch_id=batch_id,
                     batch_size=batch_size,
                     latency_ms=latency_ms,

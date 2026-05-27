@@ -84,6 +84,8 @@ if __name__ == "__main__":
                 bandwidth_mb_s = measure_bandwidth(channel, str(client_id))
             except Exception as e:
                 src.Log.print_with_color(f"[Bandwidth] Warning: {e}", "yellow")
+                if not channel.is_open:
+                    channel = connection.channel()
         else:
             bandwidth_mb_s = float(clustering_cfg.get("network_rate_mb_s", 100.0))
             src.Log.print_with_color(f"[Bandwidth] Using fixed rate from config: {bandwidth_mb_s} MB/s", "cyan")
