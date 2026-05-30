@@ -435,7 +435,10 @@ class Scheduler:
                 else:
                     time.sleep(0.5)
 
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
         pbar.close()
 
     def middle_layer(self, model):
