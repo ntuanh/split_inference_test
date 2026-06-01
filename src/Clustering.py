@@ -837,13 +837,14 @@ def print_result(result: OptimizationResult, solver: DeterministicSimilarityAssi
     print("-" * 100)
 
     client_types = getattr(solver, "client_type_names", ["?"] * solver.N)
-    edge_groups = solver._invert_assignment(result.edge_labels, result.num_clusters)
+    cloud_types  = getattr(solver, "cloud_type_names",  ["?"] * solver.M)
+    edge_groups  = solver._invert_assignment(result.edge_labels,  result.num_clusters)
     cloud_groups = solver._invert_assignment(result.cloud_labels, result.num_clusters)
 
     for e in range(result.num_clusters):
         print(f"Edge cluster {e}: clients={edge_groups[e]} types={[client_types[i] for i in edge_groups[e]]}")
     for c in range(result.num_clusters):
-        print(f"Cloud cluster {c}: servers={cloud_groups[c]}")
+        print(f"Cloud cluster {c}: servers={cloud_groups[c]} types={[cloud_types[i] for i in cloud_groups[c]]}")
     print("-" * 100)
 
     for d in result.details:

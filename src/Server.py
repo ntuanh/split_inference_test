@@ -178,6 +178,8 @@ class Server:
                 [self.client_bandwidth_data.get(str(cid), network_rate)] * M
                 for cid in edge_clients
             ]) if edge_clients else np.full((N, M), network_rate)
+            cloud_clients = [cid for cid, lid in self.list_clients
+                             if lid == len(self.total_clients) and str(cid) in self.client_profile_data]
             solver = DeterministicSimilarityAssignmentSolver(
                 client_layer_times=np.vstack(edge_times_list),
                 server_layer_times=np.vstack(cloud_times_list),
@@ -185,6 +187,8 @@ class Server:
                 input_data_size=get_raw_input_mb(self.batch_size),
                 network_rates=rates_matrix,
             )
+            solver.client_type_names = [f"edge_{str(cid)[:8]}" for cid in edge_clients]
+            solver.cloud_type_names  = [f"cloud_{str(cid)[:8]}" for cid in cloud_clients]
             result = solver.solve_best_over_k("hungarian", max_clusters=max_clusters)["best_result"]
             print_result(result, solver, title="HUNGARIAN MATCHING RESULT (real profiles)")
         else:
