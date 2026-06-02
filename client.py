@@ -49,8 +49,8 @@ connection = pika.BlockingConnection(
         port=5672,
         virtual_host=f"{virtual_host}",
         credentials=credentials,
-        heartbeat=0,
-        blocked_connection_timeout=300
+        heartbeat=60,
+        blocked_connection_timeout=600
     )
 )
 channel = connection.channel()

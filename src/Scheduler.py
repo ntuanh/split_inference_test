@@ -641,7 +641,10 @@ class Scheduler:
                 self._pivot_and_save()
         elif self.layer_id == num_layers:
             self._setup_metrics_fanout_queue()
-            self.last_layer(model, batch_size, splits, logger, compress, mode, save_set)
+            try:
+                self.last_layer(model, batch_size, splits, logger, compress, mode, save_set)
+            except Exception as e:
+                Log.print_with_color(f"[!] Connection lost: {e} — saving metrics anyway.", "yellow")
             self._pivot_and_save()
         else:
             self.middle_layer(model)
