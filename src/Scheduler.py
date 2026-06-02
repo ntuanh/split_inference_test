@@ -263,7 +263,7 @@ class Scheduler:
                     self.send_next_layer(
                         self.intermediate_queue,
                         y,
-                        compress
+                        {"enable": False}
                     )
 
                 # ===== ONLY EDGE =====
