@@ -28,6 +28,16 @@ class Scheduler:
                 except PermissionError:
                     Log.print_with_color(f"[!] Cannot delete {f} (file is open). Close it and retry.", "red")
 
+        cid_short = str(client_id).replace('-', '')[:12]
+        self._timing_log_edge  = f"timing_edge_{cid_short}.log"
+        self._timing_log_cloud = f"timing_cloud_{cid_short}.log"
+        for tlog in [self._timing_log_edge, self._timing_log_cloud]:
+            if os.path.exists(tlog):
+                try:
+                    os.remove(tlog)
+                except Exception:
+                    pass
+
         self.size_message = None
         self.intermediate_queue = f"intermediate_queue"
         self.channel.queue_declare(self.intermediate_queue, durable=False)
@@ -233,6 +243,8 @@ class Scheduler:
         pbar = tqdm(desc="Processing video (while loop)", unit="frame")
         batch_id = 0
         prev_batch_end = None
+        with open(self._timing_log_edge, "w") as _tf:
+            print(str(time.time_ns()) + " start", file=_tf)
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -244,6 +256,8 @@ class Scheduler:
             input_image.append(tensor)
 
             if len(input_image) == batch_size:
+                with open(self._timing_log_edge, "a") as _tf:
+                    print(str(time.time_ns()) + " get input", file=_tf)
                 batch_start = time.perf_counter()
                 edge_start_wall = time.time()
 
@@ -300,6 +314,8 @@ class Scheduler:
                         self.intermediate_queue,y,compress
                     )
                 batch_end = time.perf_counter()
+                with open(self._timing_log_edge, "a") as _tf:
+                    print(str(time.time_ns()) + " output", file=_tf)
                 latency_ms = (batch_end - batch_start) * 1000
                 fps = batch_size / (batch_end - prev_batch_end) if prev_batch_end is not None else 0.0
                 e2e_latency_ms = latency_ms if mode == "only_edge" else 0.0
@@ -328,6 +344,8 @@ class Scheduler:
                 pbar.update(batch_size)
             else:
                 continue
+        with open(self._timing_log_edge, "a") as _tf:
+            print(str(time.time_ns()) + " end", file=_tf)
         print(f'size message: {self.size_message} bytes.')
         cap.release()
         pbar.close()
@@ -375,9 +393,13 @@ class Scheduler:
         pbar = tqdm(desc="Processing video (while loop)", unit="frame")
         batch_id = 0
         prev_batch_end = None
+        with open(self._timing_log_cloud, "w") as _tf:
+            print(str(time.time_ns()) + " start", file=_tf)
         while True:
             method_frame, header_frame, body = self.channel.basic_get(queue=self.intermediate_queue, auto_ack=True)
             if method_frame and body:
+                with open(self._timing_log_cloud, "a") as _tf:
+                    print(str(time.time_ns()) + " get input", file=_tf)
                 batch_start = time.perf_counter()
                 received_message_size = len(body)
                 received_data = pickle.loads(body)
@@ -419,6 +441,8 @@ class Scheduler:
                 self._update_map(results, batch_id, batch_size, map_results=map_results)
 
                 batch_end = time.perf_counter()
+                with open(self._timing_log_cloud, "a") as _tf:
+                    print(str(time.time_ns()) + " output", file=_tf)
                 cloud_end_wall = time.time()
                 latency_ms = (batch_end - batch_start) * 1000
                 fps = batch_size / (batch_end - prev_batch_end) if prev_batch_end is not None else 0.0
@@ -456,6 +480,8 @@ class Scheduler:
                 else:
                     time.sleep(0.5)
 
+        with open(self._timing_log_cloud, "a") as _tf:
+            print(str(time.time_ns()) + " end", file=_tf)
         try:
             cv2.destroyAllWindows()
         except Exception:
@@ -645,7 +671,7 @@ class Scheduler:
             try:
                 self.first_layer(model, data, batch_size, splits, logger, compress, mode, save_set)
             except Exception as e:
-                Log.print_with_color(f"[!] Connection lost: {e} — saving metrics anyway.", "yellow")
+                Log.print_with_color(f"[!] Error during inference: {e} — saving metrics anyway.", "yellow")
             if mode == "only_edge":
                 self._pivot_and_save()
         elif self.layer_id == num_layers:
@@ -653,7 +679,7 @@ class Scheduler:
             try:
                 self.last_layer(model, batch_size, splits, logger, compress, mode, save_set)
             except Exception as e:
-                Log.print_with_color(f"[!] Connection lost: {e} — saving metrics anyway.", "yellow")
+                Log.print_with_color(f"[!] Error during inference: {e} — saving metrics anyway.", "yellow")
             self._pivot_and_save()
         else:
             self.middle_layer(model)
