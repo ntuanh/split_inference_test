@@ -49,8 +49,7 @@ connection = pika.BlockingConnection(
         port=5672,
         virtual_host=f"{virtual_host}",
         credentials=credentials,
-        heartbeat=60,
-        
+        heartbeat=3600,
         blocked_connection_timeout=600
     )
 )
