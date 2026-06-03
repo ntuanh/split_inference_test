@@ -32,16 +32,8 @@ username = config["rabbit"]["username"]
 password = config["rabbit"]["password"]
 virtual_host = config["rabbit"]["virtual-host"]
 
-if args.device is None:
-    if torch.cuda.is_available():
-        device = "cuda"
-        print(f"Using device: {torch.cuda.get_device_name(device)}")
-    else:
-        device = "cpu"
-        print("Using device: CPU")
-else:
-    device = args.device
-    print(f"Using device: {device}")
+device = "cpu"
+print("Using device: CPU")
 
 configured_clients = config["server"]["clients"]
 if args.layer_id < 1 or args.layer_id > len(configured_clients):
@@ -51,11 +43,7 @@ if args.layer_id < 1 or args.layer_id > len(configured_clients):
 
 NUM_THREADS = 3
 
-streams = []
-if device == "cuda":
-    streams = [torch.cuda.Stream() for _ in range(NUM_THREADS)]
-else:
-    streams = [None] * NUM_THREADS
+streams = [None] * NUM_THREADS
 
 logger = src.Log.Logger("./app.log", config['debug-mode'])
 logger.log_info("Application start.")
@@ -88,7 +76,7 @@ def get_thread_setup(thread_id):
     return setup_key, setup[setup_key]
 
 
-def execute_client(thread_id, cuda_stream):
+def execute_client(thread_id, _):
     connection = None
     try:
         setup_key, thread_setup = get_thread_setup(thread_id)
@@ -140,12 +128,8 @@ def execute_client(thread_id, cuda_stream):
             client.send_to_server(data)
             client.wait_response()
 
-        if device == "cuda":
-            with torch.cuda.stream(cuda_stream):
-                run_client()
-            torch.cuda.synchronize()
-        else:
-            run_client()
+
+        run_client()
 
         print(f"[THREAD {thread_id}] Finished")
     except Exception as e:
@@ -169,7 +153,7 @@ if __name__ == "__main__":
     for i in range(NUM_THREADS):
         t = threading.Thread(
             target=execute_client,
-            args=(i, streams[i]),
+            args=(i, None),
             name=f"client-thread-{i}"
         )
         t.start()
