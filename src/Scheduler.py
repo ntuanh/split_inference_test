@@ -371,6 +371,7 @@ class Scheduler:
                        "message": "Finish training!"}
 
         self.send_to_server(notify_data)
+        print(f"[ DEBUG ] send notify stop to server ")
 
         broadcast_queue_name = f'reply_{self.client_id}'
         while True:

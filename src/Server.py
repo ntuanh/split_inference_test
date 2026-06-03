@@ -182,9 +182,11 @@ class Server:
 
         elif action == "NOTIFY":
             self.count_clients += 1
+            print(f"[ DEBUG ] total clients {self.total_clients[0]}")
+            print(f"[ DEBUG ] counted clients {self.count_clients}")
             if self.count_clients == self.total_clients[0] * 2:
-                print(f"[ DEBUG ] total clients {self.total_clients[0]}")
-                print(f"[ DEBUG ] counted clients {self.count_clients}")
+                # print(f"[ DEBUG ] total clients {self.total_clients[0]}")
+                # print(f"[ DEBUG ] counted clients {self.count_clients}")
                 self.logger.log_info("Stop Inference !!!")
                 self.notify_clients(start=False)
                 ch.basic_ack(delivery_tag=method.delivery_tag)
