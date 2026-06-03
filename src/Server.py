@@ -55,6 +55,11 @@ class Server:
         self.client_profile_data = {}   # {client_id_str: np.array of per-layer times}
         self.client_bandwidth_data = {} # {client_id_str: float MB/s}
         self.client_name_data = {}      # {client_id_str: str name}
+        self._ram_paused = False
+        self._monitor_queues = []
+        self._edge_control_queues = []
+        self._QUEUE_HIGH = 10  # updated in _start_queue_monitor based on num edges
+        self._QUEUE_LOW  = 3
         self.channel.basic_qos(prefetch_count=1)
         self.reply_channel = self.connection.channel()
         self.channel.basic_consume(queue='rpc_queue', on_message_callback=self.on_request)
@@ -223,6 +228,49 @@ class Server:
 
         return solver, result
 
+    def _start_queue_monitor(self, clients_to_notify):
+        mode = self._get_mode()
+        if mode not in ("split", None, ""):
+            return
+        queue_names = set(
+            self.client_assignments.get(cid, {}).get("queue_name", "intermediate_queue")
+            for cid, lid in clients_to_notify if lid == 1
+        ) or {"intermediate_queue"}
+        self._monitor_queues = list(queue_names)
+        self._edge_control_queues = [
+            f"control_{str(cid).replace('-', '')[:12]}"
+            for cid, lid in clients_to_notify if lid == 1
+        ]
+        n_edge = len(self._edge_control_queues)
+        self._QUEUE_HIGH = max(10, n_edge * 2)
+        self._QUEUE_LOW  = max(3,  n_edge)
+        src.Log.print_with_color(
+            f"[BackPressure] Monitor {len(self._monitor_queues)} queue(s), "
+            f"{n_edge} edge(s), HIGH={self._QUEUE_HIGH}, LOW={self._QUEUE_LOW}", "cyan")
+        self.connection.call_later(1.0, self._check_queue_depth)
+
+    def _check_queue_depth(self):
+        try:
+            total = sum(
+                self.reply_channel.queue_declare(q, passive=True).method.message_count
+                for q in self._monitor_queues
+            )
+            if total > self._QUEUE_HIGH and not self._ram_paused:
+                src.Log.print_with_color(f"[BackPressure] depth={total} > {self._QUEUE_HIGH}, PAUSE edges", "yellow")
+                for ctrl_q in self._edge_control_queues:
+                    self.reply_channel.queue_declare(ctrl_q, durable=False)
+                    self.reply_channel.basic_publish('', ctrl_q, pickle.dumps({"action": "PAUSE"}))
+                self._ram_paused = True
+            elif total <= self._QUEUE_LOW and self._ram_paused:
+                src.Log.print_with_color(f"[BackPressure] depth={total} <= {self._QUEUE_LOW}, RESUME edges", "green")
+                for ctrl_q in self._edge_control_queues:
+                    self.reply_channel.queue_declare(ctrl_q, durable=False)
+                    self.reply_channel.basic_publish('', ctrl_q, pickle.dumps({"action": "RESUME"}))
+                self._ram_paused = False
+        except Exception:
+            pass
+        self.connection.call_later(1.0, self._check_queue_depth)
+
     def notify_clients(self, start=True):
         if start:
             default_splits = {"a": 4, "b": 11, "c": 17, "d": 23}
@@ -322,6 +370,7 @@ class Server:
                     "mode":       self._get_mode(),
                 }
                 self.send_to_response(client_id, pickle.dumps(response))
+            self._start_queue_monitor(clients_to_notify)
         else:
             response = {"action": "STOP", "message": "Stop inference !!!"}
             for (client_id, layer_id) in self.list_clients:

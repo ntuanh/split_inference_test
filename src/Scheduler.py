@@ -38,6 +38,10 @@ class Scheduler:
                 except Exception:
                     pass
 
+        self._control_queue = f"control_{cid_short}"
+        self._server_paused = False
+        self.channel.queue_declare(self._control_queue, durable=False)
+
         self.size_message = None
         self.intermediate_queue = f"intermediate_queue"
         self.channel.queue_declare(self.intermediate_queue, durable=False)
@@ -62,6 +66,34 @@ class Scheduler:
             pass
         process = psutil.Process(os.getpid())
         return process.memory_info().rss / (1024 * 1024)
+
+    def _check_control_queue(self):
+        while True:
+            method, _, body = self.channel.basic_get(self._control_queue, auto_ack=True)
+            if method is None:
+                break
+            try:
+                msg = pickle.loads(body)
+                action = msg.get("action")
+                if action == "PAUSE":
+                    self._server_paused = True
+                    Log.print_with_color("[BackPressure] PAUSE received from server", "yellow")
+                elif action == "RESUME":
+                    self._server_paused = False
+            except Exception:
+                pass
+
+        while self._server_paused:
+            time.sleep(0.5)
+            method, _, body = self.channel.basic_get(self._control_queue, auto_ack=True)
+            if method is not None:
+                try:
+                    msg = pickle.loads(body)
+                    if msg.get("action") == "RESUME":
+                        self._server_paused = False
+                        Log.print_with_color("[BackPressure] RESUME received, resuming", "green")
+                except Exception:
+                    pass
 
     def write_metrics(self, mode, role, best_cut, batch_id, batch_size, latency_ms, fps, ram_mb, message_size_bytes=0, e2e_latency_ms=0, edge_start_time=None):
         file_path = f"metrics_raw_{str(self.client_id).replace('-', '')}.csv"
@@ -302,6 +334,8 @@ class Scheduler:
                     y = []
                     x, y = inference(model, input_image, y, 0, save_set)
                     y[-1] = x
+
+                    self._check_control_queue()
 
                     y = {
                         "data": y,
