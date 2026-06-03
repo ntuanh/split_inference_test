@@ -1,14 +1,14 @@
 {
     "md0": {
-        "uuid": "M2D4",
+        "uuid": "M3D7",
         "partition_point": 16
     },
     "md1": {
-        "uuid": "M4D4",
+        "uuid": "M5D7",
         "partition_point": 16
     },
     "md2": {
-        "uuid": "M6D4",
+        "uuid": "M7D7",
         "partition_point": 16
     }
 }
