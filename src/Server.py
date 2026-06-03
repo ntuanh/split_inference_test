@@ -4,6 +4,7 @@ import sys
 import base64
 import pika
 import pickle
+import time
 import src.Model
 import src.Log
 from ultralytics import YOLO
@@ -51,15 +52,12 @@ class Server:
         self.registered_ids = set()
         self.notified = False
         self.count_clients = 0
+        self.unique_client_ids = {}     # {setup_uuid/client_id: partition_point} for tail clients
+        self.client_setup_ids = {}      # {actual client_id: setup_uuid/client_id}
         self.client_assignments = {}    # {client_id: {"splits": int, "queue_name": str}}
         self.client_profile_data = {}   # {client_id_str: np.array of per-layer times}
         self.client_bandwidth_data = {} # {client_id_str: float MB/s}
         self.client_name_data = {}      # {client_id_str: str name}
-        self._ram_paused = False
-        self._monitor_queues = []
-        self._edge_control_queues = []
-        self._QUEUE_HIGH = 10  # updated in _start_queue_monitor based on num edges
-        self._QUEUE_LOW  = 3
         self.channel.basic_qos(prefetch_count=1)
         self.reply_channel = self.connection.channel()
         self.channel.basic_consume(queue='rpc_queue', on_message_callback=self.on_request)
@@ -78,13 +76,53 @@ class Server:
             return exp.get("mode", "split")
         return "split"
 
+    def _queue_name_for_setup_uuid(self, setup_uuid):
+        safe_id = "".join(
+            ch if ch.isalnum() or ch in ("-", "_") else "_"
+            for ch in str(setup_uuid)
+        )
+        return f"intermediate_queue_{safe_id}"
+
+    def _assign_one_to_one_queues(self, default_splits):
+        layers_by_setup_uuid = {}
+        for client_id, layer_id in self.list_clients:
+            setup_uuid = self.client_setup_ids.get(client_id, client_id)
+            layers_by_setup_uuid.setdefault(setup_uuid, set()).add(layer_id)
+
+        logged = set()
+        for client_id, layer_id in self.list_clients:
+            setup_uuid = self.client_setup_ids.get(client_id, client_id)
+            queue_name = self._queue_name_for_setup_uuid(setup_uuid)
+            assigned_splits = self.unique_client_ids.get(setup_uuid, default_splits)
+            assignment_key = (client_id, layer_id)
+            assignment = dict(
+                self.client_assignments.get(
+                    assignment_key,
+                    self.client_assignments.get(client_id, {})
+                )
+            )
+            assignment["queue_name"] = queue_name
+            if assigned_splits is not None:
+                assignment["splits"] = assigned_splits
+            self.client_assignments[assignment_key] = assignment
+
+            if setup_uuid not in logged:
+                layers = sorted(layers_by_setup_uuid.get(setup_uuid, []))
+                src.Log.print_with_color(
+                    f"[Pairing] uuid={setup_uuid} layers={layers} "
+                    f"queue={queue_name} splits={assignment.get('splits')}",
+                    "green"
+                )
+                logged.add(setup_uuid)
+
     def on_request(self, ch, method, _, body):
         message = pickle.loads(body)
         action = message["action"]
 
         if action == "REGISTER":
-            client_id = message["client_id"]
-            layer_id = message["layer_id"]
+            client_id = str(message["client_id"])
+            layer_id = int(message["layer_id"])
+            setup_uuid = str(message.get("setup_uuid", client_id))
 
             src.Log.print_with_color(f"[<<<] Received REGISTER from client {client_id} layer={layer_id}", "blue")
 
@@ -93,34 +131,48 @@ class Server:
                     f"[!] Ignored client with unexpected layer_id={layer_id} (expected 1..{len(self.register_clients)})", "red")
                 return
 
-            if str(client_id) in self.registered_ids:
-                src.Log.print_with_color(f"[!] Duplicate REGISTER from {client_id}, ignored.", "yellow")
+            registration_key = (client_id, layer_id)
+            if registration_key in self.registered_ids:
+                src.Log.print_with_color(
+                    f"[!] Duplicate REGISTER from {client_id} layer={layer_id}, ignored.", "yellow")
                 return
 
-            self.registered_ids.add(str(client_id))
-            self.list_clients.append((str(client_id), layer_id))
+            self.registered_ids.add(registration_key)
+            self.list_clients.append(registration_key)
+            self.client_setup_ids[client_id] = setup_uuid
+
+            if layer_id == len(self.total_clients) and "partition_point" in message:
+                partition_point = message["partition_point"]
+                if setup_uuid in self.unique_client_ids:
+                    src.Log.print_with_color(
+                        f"[!] Overlap UUID at layer {layer_id}: {setup_uuid}", "yellow")
+                else:
+                    self.unique_client_ids[setup_uuid] = partition_point
 
             layer_times = message.get("layer_times", None)
             if layer_times is not None:
-                self.client_profile_data[str(client_id)] = np.array(layer_times, dtype=float)
+                self.client_profile_data[client_id] = np.array(layer_times, dtype=float)
                 src.Log.print_with_color(
                     f"[Profile] Stored profiling data from client {client_id} "
                     f"({len(layer_times)} layers, total={sum(layer_times)*1000:.1f} ms)", "cyan")
 
             bandwidth_mb_s = message.get("bandwidth_mb_s", None)
             if bandwidth_mb_s is not None:
-                self.client_bandwidth_data[str(client_id)] = float(bandwidth_mb_s)
+                self.client_bandwidth_data[client_id] = float(bandwidth_mb_s)
                 src.Log.print_with_color(
                     f"[Bandwidth] Stored bandwidth from client {client_id}: {bandwidth_mb_s:.1f} MB/s", "cyan")
 
             client_name = message.get("client_name", None)
             if client_name:
-                self.client_name_data[str(client_id)] = client_name
+                self.client_name_data[client_id] = client_name
 
             self.register_clients[layer_id - 1] += 1
 
             if self.register_clients == self.total_clients and not self.notified:
                 self.notified = True
+                if self.unique_client_ids:
+                    src.Log.print_with_color(
+                        f"[Log] unique_client_ids: {self.unique_client_ids}", "green")
                 src.Log.print_with_color("All clients connected. Sending notifications.", "green")
                 self.notify_clients()
 
@@ -130,7 +182,9 @@ class Server:
 
         elif action == "NOTIFY":
             self.count_clients += 1
-            if self.count_clients == self.total_clients[0]:
+            if self.count_clients == self.total_clients[0] * 2:
+                print(f"[ DEBUG ] total clients {self.total_clients[0]}")
+                print(f"[ DEBUG ] counted clients {self.count_clients}")
                 self.logger.log_info("Stop Inference !!!")
                 self.notify_clients(start=False)
                 ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -141,9 +195,35 @@ class Server:
 
     def send_to_response(self, client_id, message):
         reply_queue_name = f"reply_{client_id}"
-        self.reply_channel.queue_declare(reply_queue_name, durable=False)
+        self.reply_channel.queue_declare(queue=reply_queue_name, durable=False)
         src.Log.print_with_color(f"[>>>] Sent notification to client {client_id}", "red")
         self.reply_channel.basic_publish(exchange='', routing_key=reply_queue_name, body=message)
+
+    def _wait_reply_queues_drained(self, client_ids, timeout_s=10.0):
+        pending = {str(client_id) for client_id in client_ids}
+        deadline = time.perf_counter() + timeout_s
+
+        while pending and time.perf_counter() < deadline:
+            for client_id in list(pending):
+                queue_name = f"reply_{client_id}"
+                try:
+                    result = self.reply_channel.queue_declare(queue=queue_name, passive=True)
+                except pika.exceptions.ChannelClosedByBroker:
+                    self.reply_channel = self.connection.channel()
+                    pending.remove(client_id)
+                    continue
+
+                if result.method.message_count == 0:
+                    pending.remove(client_id)
+
+            if pending:
+                time.sleep(0.2)
+
+        if pending:
+            src.Log.print_with_color(
+                f"[Cleanup] Reply queues still have STOP messages or no reader: {sorted(pending)}",
+                "yellow"
+            )
 
     def start(self):
         self.channel.start_consuming()
@@ -228,52 +308,9 @@ class Server:
 
         return solver, result
 
-    def _start_queue_monitor(self, clients_to_notify):
-        mode = self._get_mode()
-        if mode not in ("split", None, ""):
-            return
-        queue_names = set(
-            self.client_assignments.get(cid, {}).get("queue_name", "intermediate_queue")
-            for cid, lid in clients_to_notify if lid == 1
-        ) or {"intermediate_queue"}
-        self._monitor_queues = list(queue_names)
-        self._edge_control_queues = [
-            f"control_{str(cid).replace('-', '')[:12]}"
-            for cid, lid in clients_to_notify if lid == 1
-        ]
-        n_edge = len(self._edge_control_queues)
-        self._QUEUE_HIGH = max(10, n_edge * 2)
-        self._QUEUE_LOW  = max(3,  n_edge)
-        src.Log.print_with_color(
-            f"[BackPressure] Monitor {len(self._monitor_queues)} queue(s), "
-            f"{n_edge} edge(s), HIGH={self._QUEUE_HIGH}, LOW={self._QUEUE_LOW}", "cyan")
-        self.connection.call_later(1.0, self._check_queue_depth)
-
-    def _check_queue_depth(self):
-        try:
-            total = sum(
-                self.reply_channel.queue_declare(q, passive=True).method.message_count
-                for q in self._monitor_queues
-            )
-            if total > self._QUEUE_HIGH and not self._ram_paused:
-                src.Log.print_with_color(f"[BackPressure] depth={total} > {self._QUEUE_HIGH}, PAUSE edges", "yellow")
-                for ctrl_q in self._edge_control_queues:
-                    self.reply_channel.queue_declare(ctrl_q, durable=False)
-                    self.reply_channel.basic_publish('', ctrl_q, pickle.dumps({"action": "PAUSE"}))
-                self._ram_paused = True
-            elif total <= self._QUEUE_LOW and self._ram_paused:
-                src.Log.print_with_color(f"[BackPressure] depth={total} <= {self._QUEUE_LOW}, RESUME edges", "green")
-                for ctrl_q in self._edge_control_queues:
-                    self.reply_channel.queue_declare(ctrl_q, durable=False)
-                    self.reply_channel.basic_publish('', ctrl_q, pickle.dumps({"action": "RESUME"}))
-                self._ram_paused = False
-        except Exception:
-            pass
-        self.connection.call_later(1.0, self._check_queue_depth)
-
     def notify_clients(self, start=True):
         if start:
-            default_splits = {"a": 4, "b": 11, "c": 17, "d": 23}
+            default_splits = {"a": 16, "b": 11, "c": 17, "d": 23}
 
             if os.path.exists(f"{self.model_name}.pt"):
                 src.Log.print_with_color(f"Exist {self.model_name}.pt", "green")
@@ -333,6 +370,8 @@ class Server:
                 else:
                     raise ValueError(f"Invalid cut-layer: '{self.cut_layer}'. Use a/b/c/d or set clustering.enable: True")
 
+            self._assign_one_to_one_queues(splits)
+
             file_path = f"{self.model_name}.pt"
             if not os.path.exists(file_path):
                 src.Log.print_with_color(f"{self.model_name}.pt does not exist.", "yellow")
@@ -346,8 +385,8 @@ class Server:
             seen_notify = set()
             clients_to_notify = []
             for entry in self.list_clients:
-                if entry[0] not in seen_notify:
-                    seen_notify.add(entry[0])
+                if entry not in seen_notify:
+                    seen_notify.add(entry)
                     clients_to_notify.append(entry)
 
             src.Log.print_with_color(
@@ -355,12 +394,20 @@ class Server:
                 f"(list_clients={len(self.list_clients)}).", "green")
 
             for (client_id, layer_id) in clients_to_notify:
-                assignment = self.client_assignments.get(client_id, {})
+                assignment = self.client_assignments.get(
+                    (client_id, layer_id),
+                    self.client_assignments.get(client_id, {})
+                )
+                setup_uuid = self.client_setup_ids.get(client_id, client_id)
+                assigned_splits = assignment.get(
+                    "splits",
+                    self.unique_client_ids.get(setup_uuid, splits)
+                )
                 response = {
                     "action":     "START",
                     "message":    "Server accept the connection",
                     "model":      encoded,
-                    "splits":     assignment.get("splits",     splits),
+                    "splits":     assigned_splits,
                     "queue_name": assignment.get("queue_name", "intermediate_queue"),
                     "batch_size": self.batch_size,
                     "num_layers": len(self.total_clients),
@@ -370,8 +417,8 @@ class Server:
                     "mode":       self._get_mode(),
                 }
                 self.send_to_response(client_id, pickle.dumps(response))
-            self._start_queue_monitor(clients_to_notify)
         else:
             response = {"action": "STOP", "message": "Stop inference !!!"}
             for (client_id, layer_id) in self.list_clients:
                 self.send_to_response(client_id, pickle.dumps(response))
+            self._wait_reply_queues_drained(client_id for client_id, _ in self.list_clients)

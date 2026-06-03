@@ -2,8 +2,8 @@ name: YOLO
 server:
   cut-layer: a # or b, c, d
   clients:
-    - 1 #edge
-    - 1 #cloud
+    - 3 #edge
+    - 3 #cloud
   model: yolo26n
   batch-size: 32
 experiment:
@@ -11,12 +11,15 @@ experiment:
   mode: only_cloud
   #mode: only_edge
 rabbit:
-  address: localhost
-  username: guest
-  password: guest
+  address: 192.168.101.234
+  username: admin
+  password: "123456" 
+  # address: localhost
+  # username: guest
+  # password: guest 
   virtual-host: /
 
-debug-mode: False
+debug-mode: False 
 data: video.mp4
 log-path: .
 compress:
@@ -24,7 +27,7 @@ compress:
   num_bit: 8
 
 clustering:
-  enable: True         # True → Hungarian tự chọn cut point; False → dùng cut-layer cố định
+  enable: False         # True → Hungarian tự chọn cut point; False → dùng cut-layer cố định
   num_A: 3              # num_A + num_B + num_C = clients[0] (tổng edge)
   num_B: 3
   num_C: 3

@@ -27,5 +27,8 @@ def signal_handler(sig, frame):
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     delete_old_queues(address, username, password, virtual_host)
-    server = Server(config)
-    server.start()
+    try:
+        server = Server(config)
+        server.start()
+    finally:
+        delete_old_queues(address, username, password, virtual_host)

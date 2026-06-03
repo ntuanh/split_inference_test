@@ -59,7 +59,7 @@ def encode_quant_delta(batches, num_bits=4):
     out.extend(struct.pack('<f', scale))
 
     q_prev = np.round((arrs[0] - global_min) / scale).astype(np.uint16)
-    if num_bits % 8 != 0:
+    if num_bits < 8:
         out.extend(pack_bits(q_prev, num_bits))
     else:
         dtype = np.uint8 if num_bits == 8 else np.uint16
@@ -72,7 +72,7 @@ def encode_quant_delta(batches, num_bits=4):
         mask = np.packbits(diff.astype(np.uint8), bitorder='little')
         mask = mask[:mask_bytes_len]
         out.extend(mask.tobytes())
-        if num_bits % 8 != 0:
+        if num_bits < 8:
             out.extend(pack_bits(q[diff], num_bits))
         else:
             dtype = np.uint8 if num_bits == 8 else np.uint16
@@ -94,7 +94,7 @@ def decode_quant_delta(buf):
     mask_bytes_len = math.ceil(vec_len / 8)
     batches = []
 
-    if num_bits % 8 != 0:
+    if num_bits < 8:
         byte_len = math.ceil(num_bits * vec_len / 8)
         q = unpack_bits(mv[idx:idx+byte_len], num_bits, vec_len)
         idx += byte_len
@@ -113,7 +113,7 @@ def decode_quant_delta(buf):
         diff_bits = np.unpackbits(mask, count=vec_len, bitorder='little')
         num_changed = diff_bits.sum()
 
-        if num_bits % 8 != 0:
+        if num_bits < 8:
             byte_len = math.ceil(num_bits * num_changed / 8)
             q_changed = unpack_bits(mv[idx:idx+byte_len], num_bits, num_changed)
             idx += byte_len
