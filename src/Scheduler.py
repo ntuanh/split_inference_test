@@ -220,6 +220,8 @@ class Scheduler:
         Log.print_with_color(f"[Tracker] Saved {out} ({len(self._det_results)} frames)", "green")
 
     def send_to_server(self, message):
+        print("[DEBUG] sent to server ")
+        print(message)
         self.channel.queue_declare('rpc_queue', durable=False)
         self.channel.basic_publish(exchange='',
                                    routing_key='rpc_queue',
@@ -371,7 +373,7 @@ class Scheduler:
                        "message": "Finish training!"}
 
         self.send_to_server(notify_data)
-        print(f"[ DEBUG ] send notify stop to server ")
+        # print(f"[ DEBUG ] send notify stop to server ")
 
         broadcast_queue_name = f'reply_{self.client_id}'
         while True:
@@ -470,12 +472,14 @@ class Scheduler:
 
                 pbar.update(batch_size)
 
-            elif send_notify is False:
+            elif send_notify is False and batch_id > 2:
                 # print(f"[ DEBUG ] inference completely !")
                 notify_data = {"action": "STOP", "client_id": self.client_id, "layer_id": self.layer_id,
                        "message": "Finish training!"}
 
                 self.send_to_server(notify_data)
+
+                send_notify = True 
             
             else :
                 broadcast_queue_name = f'reply_{self.client_id}'
