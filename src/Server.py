@@ -180,7 +180,7 @@ class Server:
             client_id = message["client_id"]
             self.send_to_response(str(client_id), pickle.dumps({"action": "BW_ACK"}))
 
-        elif action == "NOTIFY":
+        elif action == "STOP":
             self.count_clients += 1
             print(f"[ DEBUG ] total clients {self.total_clients[0]}")
             print(f"[ DEBUG ] counted clients {self.count_clients}")

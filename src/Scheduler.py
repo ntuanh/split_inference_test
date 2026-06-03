@@ -367,7 +367,7 @@ class Scheduler:
             except Exception as e:
                 Log.print_with_color(f"[Metrics] Failed to send metrics: {e}", "yellow")
 
-        notify_data = {"action": "NOTIFY", "client_id": self.client_id, "layer_id": self.layer_id,
+        notify_data = {"action": "STOP", "client_id": self.client_id, "layer_id": self.layer_id,
                        "message": "Finish training!"}
 
         self.send_to_server(notify_data)
@@ -472,7 +472,7 @@ class Scheduler:
 
             elif send_notify is False:
                 # print(f"[ DEBUG ] inference completely !")
-                notify_data = {"action": "NOTIFY", "client_id": self.client_id, "layer_id": self.layer_id,
+                notify_data = {"action": "STOP", "client_id": self.client_id, "layer_id": self.layer_id,
                        "message": "Finish training!"}
 
                 self.send_to_server(notify_data)
