@@ -43,7 +43,7 @@ if args.layer_id < 1 or args.layer_id > len(configured_clients):
         f"Invalid layer_id={args.layer_id}. Expected 1..{len(configured_clients)}"
     )
 
-NUM_THREADS = 1
+NUM_THREADS = 3
 
 streams = [None] * NUM_THREADS
 
