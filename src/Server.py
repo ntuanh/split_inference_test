@@ -72,7 +72,7 @@ class Server:
 
     def _get_mode(self):
         exp = self.config.get("experiment", {})
-        if exp.get("enable", True):
+        if exp.get("enable", False):
             return exp.get("mode", "split")
         return "split"
 
@@ -184,7 +184,10 @@ class Server:
             self.count_clients += 1
             print(f"[ DEBUG ] total clients {self.total_clients[0]}")
             print(f"[ DEBUG ] counted clients {self.count_clients}")
-            if self.count_clients == self.total_clients[0] * 2:
+            # only_edge: cloud clients skip inference, so only edge clients send STOP
+            mode = self._get_mode()
+            expected = self.total_clients[0] if mode == "only_edge" else self.total_clients[0] * 2
+            if self.count_clients == expected:
                 # print(f"[ DEBUG ] total clients {self.total_clients[0]}")
                 # print(f"[ DEBUG ] counted clients {self.count_clients}")
                 self.logger.log_info("Stop Inference !!!")

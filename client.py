@@ -1,5 +1,7 @@
 import argparse
+import glob as _glob
 import json
+import os
 import threading
 import traceback
 
@@ -41,7 +43,7 @@ if args.layer_id < 1 or args.layer_id > len(configured_clients):
         f"Invalid layer_id={args.layer_id}. Expected 1..{len(configured_clients)}"
     )
 
-NUM_THREADS = 3
+NUM_THREADS = 9
 
 streams = [None] * NUM_THREADS
 
@@ -144,6 +146,12 @@ def execute_client(thread_id, _):
 
 
 if __name__ == "__main__":
+    for _f in _glob.glob("metrics_raw_*.csv") + ["metrics_pivoted.csv", "metrics_pivot.lock"]:
+        try:
+            os.remove(_f)
+        except (FileNotFoundError, PermissionError):
+            pass
+
     src.Log.print_with_color(
         f"[>>>] Starting {NUM_THREADS} client thread(s) for layer_id={args.layer_id}...",
         "red"

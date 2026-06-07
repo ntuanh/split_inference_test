@@ -1,3 +1,4 @@
+import threading
 import torch
 import cv2
 import pickle
@@ -8,6 +9,8 @@ import csv
 import os
 import psutil
 import numpy as np
+
+_detections_stream_lock = threading.Lock()
 
 from src.Compress import Encoder,Decoder
 import src.Log as Log
@@ -20,13 +23,13 @@ class Scheduler:
         self.channel = channel
         self.device = device
 
-        import glob as _glob
-        for f in _glob.glob("metrics_raw_*.csv") + ["metrics_pivoted.csv", "metrics_pivot.lock"]:
-            if os.path.exists(f):
-                try:
-                    os.remove(f)
-                except PermissionError:
-                    Log.print_with_color(f"[!] Cannot delete {f} (file is open). Close it and retry.", "red")
+        # Only remove this instance's own metrics file — global cleanup is done once before threads start
+        own_metrics = f"metrics_raw_{str(client_id).replace('-', '')}.csv"
+        if os.path.exists(own_metrics):
+            try:
+                os.remove(own_metrics)
+            except PermissionError:
+                Log.print_with_color(f"[!] Cannot delete {own_metrics} (file is open). Close it and retry.", "red")
 
         cid_short = str(client_id).replace('-', '')[:12]
         self._timing_log_edge  = f"timing_edge_{cid_short}.log"
@@ -186,8 +189,9 @@ class Scheduler:
                 for i in range(len(r["boxes"]))
             ]
             self._det_results[frame_num] = dets
-            with open("detections_stream.jsonl", "a") as f:
-                f.write(json.dumps({"frame": frame_num, "dets": dets}) + "\n")
+            with _detections_stream_lock:
+                with open("detections_stream.jsonl", "a") as f:
+                    f.write(json.dumps({"frame": frame_num, "dets": dets}) + "\n")
             if self.map_metric is None or frame_num not in self.gt_dict:
                 continue
             self.map_metric.update(
@@ -247,110 +251,132 @@ class Scheduler:
         prev_batch_end = None
         with open(self._timing_log_edge, "w") as _tf:
             print(str(time.time_ns()) + " start", file=_tf)
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame = cv2.resize(frame, (640, 640))
-            orig_images.append(copy.deepcopy(frame))
-            frame = frame.astype('float32') / 255.0
-            tensor = torch.from_numpy(frame).permute(2, 0, 1)  # shape: (3, 640, 640)
-            input_image.append(tensor)
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame = cv2.resize(frame, (640, 640))
+                orig_images.append(copy.deepcopy(frame))
+                frame = frame.astype('float32') / 255.0
+                tensor = torch.from_numpy(frame).permute(2, 0, 1)  # shape: (3, 640, 640)
+                input_image.append(tensor)
 
-            if len(input_image) == batch_size:
-                with open(self._timing_log_edge, "a") as _tf:
-                    print(str(time.time_ns()) + " get input", file=_tf)
-                batch_start = time.perf_counter()
-                edge_start_wall = time.time()
+                if len(input_image) == batch_size:
+                    with open(self._timing_log_edge, "a") as _tf:
+                        print(str(time.time_ns()) + " get input", file=_tf)
+                    batch_start = time.perf_counter()
+                    edge_start_wall = time.time()
 
-                input_image = torch.stack(input_image)
-                input_image = input_image.to(self.device)
+                    input_image = torch.stack(input_image)
+                    input_image = input_image.to(self.device)
 
-                # ===== ONLY CLOUD =====
-                if mode == "only_cloud":
-                    frames_cpu = input_image.cpu()
-                    y = {
-                        "data": [frames_cpu[i].clone() for i in range(len(frames_cpu))],
-                        "width": width,
-                        "height": height,
-                        "edge_start_time": edge_start_wall
-                    }
+                    # ===== ONLY CLOUD =====
+                    if mode == "only_cloud":
+                        frames_cpu = input_image.cpu()
+                        y = {
+                            "data": [frames_cpu[i].clone() for i in range(len(frames_cpu))],
+                            "width": width,
+                            "height": height,
+                            "edge_start_time": edge_start_wall
+                        }
 
-                    while True:
-                        q = self.channel.queue_declare(self.intermediate_queue, passive=True)
-                        if q.method.message_count < 2:
-                            break
-                        time.sleep(0.5)
+                        while True:
+                            q = self.channel.queue_declare(self.intermediate_queue, passive=True)
+                            if q.method.message_count < 2:
+                                break
+                            time.sleep(0.5)
 
-                    self.send_next_layer(
-                        self.intermediate_queue,
-                        y,
-                        {"enable": False}
+                        self.send_next_layer(
+                            self.intermediate_queue,
+                            y,
+                            {"enable": False}
+                        )
+
+                    # ===== ONLY EDGE =====
+                    elif mode == "only_edge":
+
+                        y = []
+                        x, y = inference(model, input_image, y, 0, save_set)
+
+                        results     = postprocess_yolo(x, conf_thres=0.25,  iou_thres=0.5)
+                        map_results = postprocess_yolo(x, conf_thres=0.001, iou_thres=0.5)
+                        self._update_map(results, batch_id, batch_size, map_results=map_results)
+
+                    # ===== SPLIT INFERENCE =====
+                    else:
+
+                        y = []
+                        x, y = inference(model, input_image, y, 0, save_set)
+                        y[-1] = x
+
+                        y = {
+                            "data": y,
+                            "width": width,
+                            "height": height,
+                            "edge_start_time": edge_start_wall
+                        }
+
+                        while True:
+                            q = self.channel.queue_declare(self.intermediate_queue, passive=True)
+                            if q.method.message_count < 2:
+                                break
+                            time.sleep(0.5)
+
+                        self.send_next_layer(
+                            self.intermediate_queue, y, compress
+                        )
+                    batch_end = time.perf_counter()
+                    with open(self._timing_log_edge, "a") as _tf:
+                        print(str(time.time_ns()) + " output", file=_tf)
+                    latency_ms = (batch_end - batch_start) * 1000
+                    fps = batch_size / (batch_end - prev_batch_end) if prev_batch_end is not None else 0.0
+                    e2e_latency_ms = latency_ms if mode == "only_edge" else 0.0
+                    ram_mb = self.get_ram_mb()
+                    msg_size = self.size_message if self.size_message is not None else 0
+
+                    self.write_metrics(
+                        mode=mode,
+                        role="edge_sender" if mode == "only_cloud" else "edge",
+                        best_cut="N/A" if splits is None else splits,
+                        batch_id=batch_id,
+                        batch_size=batch_size,
+                        latency_ms=latency_ms,
+                        fps=fps,
+                        ram_mb=ram_mb,
+                        message_size_bytes=msg_size,
+                        e2e_latency_ms=e2e_latency_ms,
+                        edge_start_time=edge_start_wall,
                     )
 
-                # ===== ONLY EDGE =====
-                elif mode == "only_edge":
+                    batch_id += 1
+                    prev_batch_end = batch_end
 
-                    y = []
-                    x, y = inference(model, input_image, y, 0, save_set)
-
-                    results     = postprocess_yolo(x, conf_thres=0.25,  iou_thres=0.5)
-                    map_results = postprocess_yolo(x, conf_thres=0.001, iou_thres=0.5)
-                    self._update_map(results, batch_id, batch_size, map_results=map_results)
-
-                # ===== SPLIT INFERENCE =====
+                    input_image = []
+                    orig_images = []
+                    pbar.update(batch_size)
                 else:
+                    continue
+        except Exception as loop_err:
+            Log.print_with_color(f"[!] Video loop error at batch {batch_id}: {loop_err}", "red")
+        finally:
+            with open(self._timing_log_edge, "a") as _tf:
+                print(str(time.time_ns()) + " end", file=_tf)
+            print(f'size message: {self.size_message} bytes.')
+            cap.release()
+            pbar.close()
 
-                    y = []
-                    x, y = inference(model, input_image, y, 0, save_set)
-                    y[-1] = x
-
-                    y = {
-                        "data": y,
-                        "width": width,
-                        "height": height,
-                        "edge_start_time": edge_start_wall
-                    }
-
-                    self.send_next_layer(
-                        self.intermediate_queue,y,compress
-                    )
-                batch_end = time.perf_counter()
-                with open(self._timing_log_edge, "a") as _tf:
-                    print(str(time.time_ns()) + " output", file=_tf)
-                latency_ms = (batch_end - batch_start) * 1000
-                fps = batch_size / (batch_end - prev_batch_end) if prev_batch_end is not None else 0.0
-                e2e_latency_ms = latency_ms if mode == "only_edge" else 0.0
-                ram_mb = self.get_ram_mb()
-                msg_size = self.size_message if self.size_message is not None else 0
-
-                self.write_metrics(
-                    mode=mode,
-                    role="edge_sender" if mode == "only_cloud" else "edge",
-                    best_cut="N/A" if splits is None else splits,
-                    batch_id=batch_id,
-                    batch_size=batch_size,
-                    latency_ms=latency_ms,
-                    fps=fps,
-                    ram_mb=ram_mb,
-                    message_size_bytes=msg_size,
-                    e2e_latency_ms=e2e_latency_ms,
-                    edge_start_time=edge_start_wall,
+        # Always send DONE before notifying server — cloud cannot proceed without it
+        if mode != "only_edge":
+            try:
+                self.channel.basic_publish(
+                    exchange='',
+                    routing_key=self.intermediate_queue,
+                    body=pickle.dumps({"action": "DONE", "client_id": self.client_id})
                 )
-
-                batch_id += 1
-                prev_batch_end = batch_end
-
-                input_image = []
-                orig_images = []
-                pbar.update(batch_size)
-            else:
-                continue
-        with open(self._timing_log_edge, "a") as _tf:
-            print(str(time.time_ns()) + " end", file=_tf)
-        print(f'size message: {self.size_message} bytes.')
-        cap.release()
-        pbar.close()
+                Log.print_with_color("[>>>] Sent DONE sentinel to cloud.", "cyan")
+            except Exception as done_err:
+                Log.print_with_color(f"[!] Failed to send DONE sentinel: {done_err}", "red")
 
         # Broadcast metrics CSV lên tất cả cloud trong cluster qua fanout exchange
         metrics_file = f"metrics_raw_{str(self.client_id).replace('-', '')}.csv"
@@ -395,18 +421,31 @@ class Scheduler:
         self.channel.basic_qos(prefetch_count=10)
         pbar = tqdm(desc="Processing video (while loop)", unit="frame")
         batch_id = 0
-        send_notify = False 
+        send_notify = False
+        _empty_poll_count = 0
         prev_batch_end = None
         with open(self._timing_log_cloud, "w") as _tf:
             print(str(time.time_ns()) + " start", file=_tf)
         while True:
             method_frame, header_frame, body = self.channel.basic_get(queue=self.intermediate_queue, auto_ack=True)
             if method_frame and body:
+                _empty_poll_count = 0
+                received_message_size = len(body)
+                received_data = pickle.loads(body)
+
+                # Edge sent DONE sentinel — all frames have been transmitted
+                if received_data.get("action") == "DONE":
+                    if not send_notify:
+                        Log.print_with_color("[ DEBUG ] inference completely !", "green")
+                        notify_data = {"action": "STOP", "client_id": self.client_id,
+                                       "layer_id": self.layer_id, "message": "Finish training!"}
+                        self.send_to_server(notify_data)
+                        send_notify = True
+                    continue  # fall through to else branch next iteration to await server STOP
+
                 with open(self._timing_log_cloud, "a") as _tf:
                     print(str(time.time_ns()) + " get input", file=_tf)
                 batch_start = time.perf_counter()
-                received_message_size = len(body)
-                received_data = pickle.loads(body)
                 y = received_data["data"]
                 edge_start_time = y.get("edge_start_time", time.time())
 
@@ -472,16 +511,18 @@ class Scheduler:
 
                 pbar.update(batch_size)
 
-            elif send_notify is False and batch_id > 2:
-                # print(f"[ DEBUG ] inference completely !")
-                notify_data = {"action": "STOP", "client_id": self.client_id, "layer_id": self.layer_id,
-                       "message": "Finish training!"}
+            elif send_notify is False and batch_id > 0:
+                _empty_poll_count += 1
+                # Fallback: DONE sentinel lost — fire after 60 empty polls (~30 s)
+                if _empty_poll_count >= 60:
+                    Log.print_with_color("[!] DONE sentinel not received — sending STOP via fallback.", "yellow")
+                    notify_data = {"action": "STOP", "client_id": self.client_id, "layer_id": self.layer_id,
+                           "message": "Finish training!"}
+                    self.send_to_server(notify_data)
+                    send_notify = True
+                    _empty_poll_count = 0
 
-                self.send_to_server(notify_data)
-
-                send_notify = True 
-            
-            else :
+            else:
                 broadcast_queue_name = f'reply_{self.client_id}'
                 method_frame, header_frame, body = self.channel.basic_get(queue=broadcast_queue_name, auto_ack=True)
                 if body:
@@ -674,8 +715,10 @@ class Scheduler:
             self._write_detections_json()
 
     def inference_func(self, model, data, num_layers, splits, batch_size, logger, compress, mode="split", queue_name="intermediate_queue", save_set=None):
-        if os.path.exists("detections_stream.jsonl"):
+        try:
             os.remove("detections_stream.jsonl")
+        except FileNotFoundError:
+            pass
         if queue_name != self.intermediate_queue:
             self.intermediate_queue = queue_name
             self.channel.queue_declare(self.intermediate_queue, durable=False)
