@@ -15,6 +15,22 @@ _detections_stream_lock = threading.Lock()
 from src.Compress import Encoder,Decoder
 import src.Log as Log
 from src.Model import inference, postprocess_yolo
+from src.Utils import RAM_GUARD_PAUSE_ACTION, RAM_GUARD_RESUME_ACTION
+
+# Hard ceiling enforced by the broker itself: once an intermediate queue holds
+# this many bytes of unconsumed messages, RabbitMQ drops the oldest message to
+# make room (x-overflow=drop-head). This guarantees the broker's RAM usage for
+# this queue can never exceed the cap, regardless of producer/consumer pace —
+# a last-resort safety net behind the proactive throttle below.
+INTERMEDIATE_QUEUE_MAX_BYTES = 256 * 1024 * 1024
+INTERMEDIATE_QUEUE_ARGS = {
+    'x-max-length-bytes': INTERMEDIATE_QUEUE_MAX_BYTES,
+    'x-overflow': 'drop-head',
+}
+# Producer self-throttles once the queue is estimated to hold this many bytes,
+# well below the hard ceiling — so drop-head should rarely actually trigger.
+INTERMEDIATE_QUEUE_THROTTLE_BYTES = INTERMEDIATE_QUEUE_MAX_BYTES // 2
+
 
 class Scheduler:
     def __init__(self, client_id, layer_id, channel, device):
@@ -43,8 +59,10 @@ class Scheduler:
 
         self.size_message = None
         self.intermediate_queue = f"intermediate_queue"
-        self.channel.queue_declare(self.intermediate_queue, durable=False)
+        self.channel.queue_declare(self.intermediate_queue, durable=False, arguments=INTERMEDIATE_QUEUE_ARGS)
         self._my_metrics_queue = None  # set by _setup_metrics_fanout_queue
+        self._reply_queue = f"reply_{self.client_id}"
+        self._send_paused = False  # set by the server's RAM guard via PAUSE_SEND/RESUME_SEND
 
         self.map_metric = None
         self.gt_dict = {}
@@ -115,6 +133,50 @@ class Scheduler:
         except Exception as e:
             Log.print_with_color(f"[Metrics] Fanout setup failed: {e}", "yellow")
             self._my_metrics_queue = None
+
+    def _poll_send_control(self):
+        """Drain any PAUSE_SEND/RESUME_SEND messages the server's RAM guard has
+        dropped on our reply queue and update self._send_paused accordingly.
+        Non-blocking — these are the only messages expected here while sending
+        (START already consumed, STOP only arrives after we report DONE)."""
+        while True:
+            _, _, body = self.channel.basic_get(queue=self._reply_queue, auto_ack=True)
+            if not body:
+                return
+            try:
+                control = pickle.loads(body)
+            except Exception:
+                continue
+            action = control.get("action")
+            if action == RAM_GUARD_PAUSE_ACTION and not self._send_paused:
+                self._send_paused = True
+                Log.print_with_color("[RAM-Guard] Server asked us to pause sending — backing off.", "yellow")
+            elif action == RAM_GUARD_RESUME_ACTION and self._send_paused:
+                self._send_paused = False
+                Log.print_with_color("[RAM-Guard] Server cleared the pause — resuming sending.", "green")
+
+    def _wait_for_queue_capacity(self):
+        """Block the producer while it isn't safe/permitted to publish the next
+        batch: either the server's RAM guard has told us to pause (broker memory
+        running high), or the intermediate queue is estimated to already be
+        holding too many bytes. The latter uses message_count * size of the last
+        published message as a byte estimate (messages are uniform size within a
+        run — same batch_size/compression). Together these keep the producer at
+        the consumer's pace instead of flooding the broker's RAM."""
+        while True:
+            self._poll_send_control()
+            if self._send_paused:
+                time.sleep(0.5)
+                continue
+
+            q = self.channel.queue_declare(self.intermediate_queue, passive=True)
+            count = q.method.message_count
+            if self.size_message:
+                if count * self.size_message < INTERMEDIATE_QUEUE_THROTTLE_BYTES:
+                    break
+            elif count < 2:
+                break
+            time.sleep(0.5)
 
     def send_next_layer(self, intermediate_queue, data, compress):
 
@@ -281,11 +343,7 @@ class Scheduler:
                             "edge_start_time": edge_start_wall
                         }
 
-                        while True:
-                            q = self.channel.queue_declare(self.intermediate_queue, passive=True)
-                            if q.method.message_count < 2:
-                                break
-                            time.sleep(0.5)
+                        self._wait_for_queue_capacity()
 
                         self.send_next_layer(
                             self.intermediate_queue,
@@ -317,11 +375,7 @@ class Scheduler:
                             "edge_start_time": edge_start_wall
                         }
 
-                        while True:
-                            q = self.channel.queue_declare(self.intermediate_queue, passive=True)
-                            if q.method.message_count < 2:
-                                break
-                            time.sleep(0.5)
+                        self._wait_for_queue_capacity()
 
                         self.send_next_layer(
                             self.intermediate_queue, y, compress
@@ -721,7 +775,7 @@ class Scheduler:
             pass
         if queue_name != self.intermediate_queue:
             self.intermediate_queue = queue_name
-            self.channel.queue_declare(self.intermediate_queue, durable=False)
+            self.channel.queue_declare(self.intermediate_queue, durable=False, arguments=INTERMEDIATE_QUEUE_ARGS)
 
         if self.layer_id == 1:
             try:

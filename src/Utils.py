@@ -14,6 +14,12 @@ QUEUE_DELETE_PREFIXES = (
     "mfq",
 )
 
+# Control actions broadcast by the server's RAM guard to layer-1 (edge) clients
+# over their reply_<client_id> queues, telling them to stop/resume publishing
+# to the intermediate queues when the broker's memory usage gets too high.
+RAM_GUARD_PAUSE_ACTION = "PAUSE_SEND"
+RAM_GUARD_RESUME_ACTION = "RESUME_SEND"
+
 
 def delete_old_queues(address, username, password, virtual_host):
     url = f'http://{address}:15672/api/queues'

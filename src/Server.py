@@ -4,9 +4,13 @@ import sys
 import base64
 import pika
 import pickle
+import threading
 import time
+import requests
+from requests.auth import HTTPBasicAuth
 import src.Model
 import src.Log
+from src.Utils import RAM_GUARD_PAUSE_ACTION, RAM_GUARD_RESUME_ACTION
 from ultralytics import YOLO
 
 from src.Clustering import (
@@ -61,6 +65,17 @@ class Server:
         self.channel.basic_qos(prefetch_count=1)
         self.reply_channel = self.connection.channel()
         self.channel.basic_consume(queue='rpc_queue', on_message_callback=self.on_request)
+
+        # RAM guard: watches the broker's own memory usage (via the management
+        # HTTP API) and tells layer-1 (edge) clients to pause/resume publishing
+        # to the intermediate queues, so the broker never gets close to OOM.
+        ram_guard_cfg = config.get("ram-guard", {})
+        self.ram_guard_enable = ram_guard_cfg.get("enable", True)
+        self.ram_pause_ratio = float(ram_guard_cfg.get("pause_ratio", 0.70))
+        self.ram_resume_ratio = float(ram_guard_cfg.get("resume_ratio", 0.50))
+        self.ram_poll_interval_s = float(ram_guard_cfg.get("poll_interval_s", 2.0))
+        self._ram_guard_stop = threading.Event()
+        self._ram_guard_paused = False
 
         self.data = config["data"]
         self.compress = config["compress"]
@@ -230,8 +245,84 @@ class Server:
                 "yellow"
             )
 
+    def _broker_memory_ratio(self):
+        """Query the RabbitMQ management API for this node's mem_used/mem_limit
+        ratio. Returns None if the API is unreachable or fields are missing."""
+        try:
+            url = f"http://{self.address}:15672/api/nodes"
+            response = requests.get(
+                url, auth=HTTPBasicAuth(self.username, self.password), timeout=5
+            )
+            response.raise_for_status()
+            nodes = response.json()
+            if not nodes:
+                return None
+            mem_used = nodes[0].get("mem_used")
+            mem_limit = nodes[0].get("mem_limit")
+            if not mem_used or not mem_limit:
+                return None
+            return mem_used / mem_limit
+        except Exception:
+            return None
+
+    def _broadcast_send_control(self, channel, action):
+        for client_id, layer_id in list(self.list_clients):
+            if layer_id != 1:
+                continue
+            reply_queue_name = f"reply_{client_id}"
+            channel.queue_declare(queue=reply_queue_name, durable=False)
+            channel.basic_publish(
+                exchange='', routing_key=reply_queue_name,
+                body=pickle.dumps({"action": action})
+            )
+
+    def _ram_guard_loop(self):
+        """Background thread: polls broker memory usage and tells edge (layer-1)
+        clients to pause/resume publishing to the intermediate queues, with
+        hysteresis between pause_ratio and resume_ratio so it doesn't flap.
+        Uses its own connection — pika's BlockingConnection is not thread-safe,
+        so it can't share self.connection/self.channel with the consumer loop."""
+        credentials = pika.PlainCredentials(self.username, self.password)
+        connection = pika.BlockingConnection(
+            pika.ConnectionParameters(
+                host=self.address,
+                port=5672,
+                virtual_host=f"{self.virtual_host}",
+                credentials=credentials,
+                heartbeat=3600,
+                blocked_connection_timeout=600
+            )
+        )
+        channel = connection.channel()
+        try:
+            while not self._ram_guard_stop.is_set():
+                ratio = self._broker_memory_ratio()
+                if ratio is not None:
+                    if not self._ram_guard_paused and ratio >= self.ram_pause_ratio:
+                        self._ram_guard_paused = True
+                        self._broadcast_send_control(channel, RAM_GUARD_PAUSE_ACTION)
+                        src.Log.print_with_color(
+                            f"[RAM-Guard] Broker memory at {ratio:.0%} (>= {self.ram_pause_ratio:.0%}) "
+                            f"— told edge clients to pause sending.", "yellow")
+                    elif self._ram_guard_paused and ratio <= self.ram_resume_ratio:
+                        self._ram_guard_paused = False
+                        self._broadcast_send_control(channel, RAM_GUARD_RESUME_ACTION)
+                        src.Log.print_with_color(
+                            f"[RAM-Guard] Broker memory at {ratio:.0%} (<= {self.ram_resume_ratio:.0%}) "
+                            f"— told edge clients to resume sending.", "green")
+                self._ram_guard_stop.wait(self.ram_poll_interval_s)
+        finally:
+            connection.close()
+
     def start(self):
-        self.channel.start_consuming()
+        guard_thread = None
+        if self.ram_guard_enable:
+            guard_thread = threading.Thread(target=self._ram_guard_loop, name="ram-guard", daemon=True)
+            guard_thread.start()
+        try:
+            self.channel.start_consuming()
+        finally:
+            self._ram_guard_stop.set()
         self.connection.close()
         sys.exit(0)
 
