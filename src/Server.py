@@ -266,15 +266,18 @@ class Server:
             return None
 
     def _broadcast_send_control(self, channel, action):
+        # Broadcast to every client: edges (layer 1) pause/resume publishing,
+        # clouds (last layer) use it to know an empty queue is expected and
+        # must not trigger their DONE-lost fallback STOP.
         for client_id, layer_id in list(self.list_clients):
-            if layer_id != 1:
-                continue
             reply_queue_name = f"reply_{client_id}"
             channel.queue_declare(queue=reply_queue_name, durable=False)
             channel.basic_publish(
                 exchange='', routing_key=reply_queue_name,
                 body=pickle.dumps({"action": action})
             )
+            src.Log.print_with_color(
+                f"[RAM-Guard] >>> {action} -> client {client_id} (layer {layer_id})", "yellow")
 
     def _ram_guard_loop(self):
         """Background thread: polls broker memory usage and tells edge (layer-1)

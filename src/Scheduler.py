@@ -31,6 +31,15 @@ INTERMEDIATE_QUEUE_ARGS = {
 # well below the hard ceiling — so drop-head should rarely actually trigger.
 INTERMEDIATE_QUEUE_THROTTLE_BYTES = INTERMEDIATE_QUEUE_MAX_BYTES // 2
 
+# RabbitMQ refuses any message larger than its configured max_message_size by
+# CLOSING the publishing channel — which silently kills the rest of the run
+# (DONE sentinel, metrics, STOP all fail with "Channel is closed"). The default
+# is 16 MiB on RabbitMQ 4.x (128 MiB on 3.x). So batches whose serialized form
+# exceeds this are split into CHUNK messages of this size on the wire and
+# reassembled by the consumer. 8 MiB (+ ~100 B envelope) stays safely under the
+# strictest default.
+WIRE_CHUNK_BYTES = 8 * 1024 * 1024
+
 
 class Scheduler:
     def __init__(self, client_id, layer_id, channel, device):
@@ -139,25 +148,29 @@ class Scheduler:
             self._my_metrics_queue = None
 
     def _poll_send_control(self):
-        """Drain any PAUSE_SEND/RESUME_SEND messages the server's RAM guard has
+        """Drain PAUSE_SEND/RESUME_SEND messages the server's RAM guard has
         dropped on our reply queue and update self._send_paused accordingly.
-        Non-blocking — these are the only messages expected here while sending
-        (START already consumed, STOP only arrives after we report DONE)."""
+        Non-blocking. Returns the first non-control message encountered (e.g.
+        the server's final STOP) so the caller can handle it, or None."""
         while True:
             _, _, body = self.channel.basic_get(queue=self._reply_queue, auto_ack=True)
             if not body:
-                return
+                return None
             try:
                 control = pickle.loads(body)
             except Exception:
                 continue
             action = control.get("action")
-            if action == RAM_GUARD_PAUSE_ACTION and not self._send_paused:
-                self._send_paused = True
-                Log.print_with_color("[RAM-Guard] Server asked us to pause sending — backing off.", "yellow")
-            elif action == RAM_GUARD_RESUME_ACTION and self._send_paused:
-                self._send_paused = False
-                Log.print_with_color("[RAM-Guard] Server cleared the pause — resuming sending.", "green")
+            if action == RAM_GUARD_PAUSE_ACTION:
+                if not self._send_paused:
+                    self._send_paused = True
+                    Log.print_with_color("[RAM-Guard] PAUSE received from server — holding off.", "yellow")
+            elif action == RAM_GUARD_RESUME_ACTION:
+                if self._send_paused:
+                    self._send_paused = False
+                    Log.print_with_color("[RAM-Guard] RESUME received from server — continuing.", "green")
+            else:
+                return control
 
     def _wait_for_queue_capacity(self):
         """Block the producer while it isn't safe/permitted to publish the next
@@ -168,7 +181,11 @@ class Scheduler:
         run — same batch_size/compression). Together these keep the producer at
         the consumer's pace instead of flooding the broker's RAM."""
         while True:
-            self._poll_send_control()
+            leftover = self._poll_send_control()
+            if leftover is not None:
+                # Nothing but RAM-guard control should arrive here (the server's
+                # STOP only comes after we report our own) — log it just in case.
+                Log.print_with_color(f"[!] Unexpected message while sending: {leftover}", "yellow")
             if self._send_paused:
                 time.sleep(0.5)
                 continue
@@ -205,15 +222,47 @@ class Scheduler:
         timings["serialize_ms"] = (time.perf_counter() - t0) * 1000
 
         t0 = time.perf_counter()  # publish to the intermediate queue
-        self.channel.basic_publish(
-            exchange='',
-            routing_key=intermediate_queue,
-            body=message,
-            #body= "."
-        )
+        if len(message) <= WIRE_CHUNK_BYTES:
+            self.channel.basic_publish(
+                exchange='',
+                routing_key=intermediate_queue,
+                body=message,
+            )
+        else:
+            self._publish_chunked(intermediate_queue, message)
         timings["publish_ms"] = (time.perf_counter() - t0) * 1000
 
         return timings
+
+    def _publish_chunked(self, intermediate_queue, message):
+        """Send a serialized batch that exceeds WIRE_CHUNK_BYTES as a sequence of
+        CHUNK messages the consumer reassembles. Keeps every wire message under
+        the broker's max_message_size (which would otherwise close the channel)
+        and paces the chunks so their combined size never trips the queue's
+        x-max-length-bytes drop-head cap."""
+        total_chunks = -(-len(message) // WIRE_CHUNK_BYTES)
+        Log.print_with_color(
+            f"[Chunked] Batch is {len(message) / 1e6:.0f} MB — sending as "
+            f"{total_chunks} chunks of <= {WIRE_CHUNK_BYTES / 1e6:.0f} MB.", "cyan")
+        # Cap in-queue chunk bytes at the throttle threshold (half the queue's
+        # hard byte cap), so a slow consumer can never push us into drop-head.
+        max_waiting = max(1, INTERMEDIATE_QUEUE_THROTTLE_BYTES // WIRE_CHUNK_BYTES)
+        for seq in range(total_chunks):
+            while True:
+                q = self.channel.queue_declare(intermediate_queue, passive=True)
+                if q.method.message_count < max_waiting:
+                    break
+                time.sleep(0.1)
+            self.channel.basic_publish(
+                exchange='',
+                routing_key=intermediate_queue,
+                body=pickle.dumps({
+                    "action": "CHUNK",
+                    "seq": seq,
+                    "total": total_chunks,
+                    "payload": message[seq * WIRE_CHUNK_BYTES:(seq + 1) * WIRE_CHUNK_BYTES],
+                }),
+            )
 
     def _load_gt_dict(self, gt_dir="datasets/groundtruth"):
         if not os.path.isdir(gt_dir):
@@ -540,6 +589,7 @@ class Scheduler:
         batch_id = 0
         send_notify = False
         _empty_poll_count = 0
+        _chunk_buf = {}  # seq -> payload, for reassembling oversized CHUNK'ed batches
         prev_batch_end = None  # perf_counter() of previous batch's end, used to compute fps
         with open(self._timing_log_cloud, "w") as _tf:
             print(str(time.time_ns()) + " start", file=_tf)  # raw timestamp: cloud loop started
@@ -555,6 +605,21 @@ class Scheduler:
                 t0 = time.perf_counter()  # start of "total" timing window + deserialize
                 batch_start = t0
                 received_data = pickle.loads(body)
+
+                # Oversized batch arriving as CHUNK pieces — collect until the
+                # set is complete, then reassemble into the original message.
+                # Safe because each intermediate queue has exactly one producer,
+                # so chunks of one batch arrive contiguously and in order.
+                if received_data.get("action") == "CHUNK":
+                    _chunk_buf[received_data["seq"]] = received_data["payload"]
+                    if len(_chunk_buf) < received_data["total"]:
+                        wait_start = time.perf_counter()
+                        continue  # more chunks of this batch still in transit
+                    body = b"".join(_chunk_buf[i] for i in range(received_data["total"]))
+                    _chunk_buf = {}
+                    received_message_size = len(body)
+                    received_data = pickle.loads(body)
+
                 deserialize_ms = (time.perf_counter() - t0) * 1000
 
                 # Edge sent DONE sentinel — all frames have been transmitted
@@ -680,23 +745,33 @@ class Scheduler:
                 pbar.update(batch_size)
 
             elif send_notify is False and batch_id > 0:
-                _empty_poll_count += 1
-                # Fallback: DONE sentinel lost — fire after 60 empty polls (~30 s)
-                if _empty_poll_count >= 60:
-                    Log.print_with_color("[!] DONE sentinel not received — sending STOP via fallback.", "yellow")
-                    notify_data = {"action": "STOP", "client_id": self.client_id, "layer_id": self.layer_id,
-                           "message": "Finish training!"}
-                    self.send_to_server(notify_data)
-                    send_notify = True
+                # Queue ran dry mid-run: handle RAM-guard PAUSE/RESUME so a guard
+                # pause isn't mistaken for a lost DONE sentinel.
+                leftover = self._poll_send_control()
+                if leftover is not None and leftover.get("action") == "STOP":
+                    Log.print_with_color("[>>>] Finish!", "red")
+                    break
+                if self._send_paused:
+                    # Edge senders are paused by the server's RAM guard — an
+                    # empty queue is expected, don't count it toward the fallback.
                     _empty_poll_count = 0
+                else:
+                    _empty_poll_count += 1
+                    # Fallback: DONE sentinel lost — fire after 60 empty polls (~30 s)
+                    if _empty_poll_count >= 60:
+                        Log.print_with_color("[!] DONE sentinel not received — sending STOP via fallback.", "yellow")
+                        notify_data = {"action": "STOP", "client_id": self.client_id, "layer_id": self.layer_id,
+                               "message": "Finish training!"}
+                        self.send_to_server(notify_data)
+                        send_notify = True
+                        _empty_poll_count = 0
+                time.sleep(0.5)
 
             else:
-                broadcast_queue_name = f'reply_{self.client_id}'
-                method_frame, header_frame, body = self.channel.basic_get(queue=broadcast_queue_name, auto_ack=True)
-                if body:
-                    received_data = pickle.loads(body)
+                received_data = self._poll_send_control()
+                if received_data is not None:
                     Log.print_with_color(f"[<<<] Received message from server {received_data}", "blue")
-                    if received_data["action"] == "STOP":
+                    if received_data.get("action") == "STOP":
                         Log.print_with_color("[>>>] Finish!", "red")
                         break
                 else:
