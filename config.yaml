@@ -2,8 +2,8 @@ name: YOLO
 server:
   cut-layer: a # or b, c, d
   clients:
-    - 3 #edge
-    - 3 #cloud
+    - 9 #edge
+    - 9 #cloud
   model: yolo26n
   batch-size: 32
 experiment:
@@ -19,11 +19,18 @@ rabbit:
   # password: guest 
   virtual-host: /
 
-debug-mode: False 
+debug-mode: False
 data: video.mp4
 log-path: .
+
+ram-guard:
+  enable: True          # server watches broker RAM (via management API) and pauses/resumes edge senders
+  pause_ratio: 0.70     # tell edge clients to stop sending once broker mem_used/mem_limit reaches this
+  resume_ratio: 0.50    # tell them to resume once it drops back to this (hysteresis avoids flapping)
+  poll_interval_s: 2.0
+
 compress:
-  enable: True
+  enable: False
   num_bit: 8
 
 clustering:

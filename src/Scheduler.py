@@ -47,6 +47,8 @@ class Scheduler:
             except PermissionError:
                 Log.print_with_color(f"[!] Cannot delete {own_metrics} (file is open). Close it and retry.", "red")
 
+        # Raw per-batch timestamp logs (nanosecond "start"/"get input"/"output"/"end"
+        # markers) written by first_layer/last_layer. Reset at the start of each run.
         cid_short = str(client_id).replace('-', '')[:12]
         self._timing_log_edge  = f"timing_edge_{cid_short}.log"
         self._timing_log_cloud = f"timing_cloud_{cid_short}.log"
@@ -68,6 +70,8 @@ class Scheduler:
         self.gt_dict = {}
         self._det_results = {}
         self._load_gt_dict()
+
+        self.prev_time = None 
 
     def get_ram_mb(self):
         try:
@@ -179,7 +183,9 @@ class Scheduler:
             time.sleep(0.5)
 
     def send_next_layer(self, intermediate_queue, data, compress):
+        timings = {}
 
+        t0 = time.perf_counter()  # compress (or just move to cpu if compression disabled)
         if compress["enable"]:
             data["data"] = [t.cpu().numpy() if isinstance(t, torch.Tensor) else None for t in
                                      data["data"]]
@@ -188,19 +194,26 @@ class Scheduler:
         else:
             data["data"] = [t.cpu() if isinstance(t, torch.Tensor) else None for t in
                                      data["data"]]
+        timings["compress_ms"] = (time.perf_counter() - t0) * 1000
+
+        t0 = time.perf_counter()  # serialize the message for the wire
         message = pickle.dumps({
             "action": "OUTPUT",
             "data": data
         })
         self.size_message = len(message)
+        timings["serialize_ms"] = (time.perf_counter() - t0) * 1000
 
-
+        t0 = time.perf_counter()  # publish to the intermediate queue
         self.channel.basic_publish(
             exchange='',
             routing_key=intermediate_queue,
             body=message,
             #body= "."
         )
+        timings["publish_ms"] = (time.perf_counter() - t0) * 1000
+
+        return timings
 
     def _load_gt_dict(self, gt_dir="datasets/groundtruth"):
         if not os.path.isdir(gt_dir):
@@ -310,9 +323,9 @@ class Scheduler:
 
         pbar = tqdm(desc="Processing video (while loop)", unit="frame")
         batch_id = 0
-        prev_batch_end = None
+        prev_batch_end = None  # perf_counter() of previous batch's end, used to compute fps
         with open(self._timing_log_edge, "w") as _tf:
-            print(str(time.time_ns()) + " start", file=_tf)
+            print(str(time.time_ns()) + " start", file=_tf)  # raw timestamp: edge loop started
         try:
             while True:
                 ret, frame = cap.read()
@@ -326,12 +339,22 @@ class Scheduler:
 
                 if len(input_image) == batch_size:
                     with open(self._timing_log_edge, "a") as _tf:
-                        print(str(time.time_ns()) + " get input", file=_tf)
-                    batch_start = time.perf_counter()
-                    edge_start_wall = time.time()
+                        print(str(time.time_ns()) + " get input", file=_tf)  # raw timestamp: batch of frames ready
+                    batch_start = time.perf_counter()  # start of this batch's "total" timing window (-> latency_ms)
+                    edge_start_wall = time.time()  # wall-clock time embedded in the message for e2e latency on the cloud side
 
+                    t0 = time.perf_counter()  # stack frames into a batch + move to device
                     input_image = torch.stack(input_image)
                     input_image = input_image.to(self.device)
+                    to_device_ms = (time.perf_counter() - t0) * 1000
+
+                    # Defaults for stages that don't apply to every mode
+                    inference_ms = 0.0
+                    postprocess_ms = 0.0
+                    queue_wait_ms = 0.0
+                    compress_ms = 0.0
+                    serialize_ms = 0.0
+                    publish_ms = 0.0
 
                     # ===== ONLY CLOUD =====
                     if mode == "only_cloud":
@@ -343,30 +366,41 @@ class Scheduler:
                             "edge_start_time": edge_start_wall
                         }
 
+                        t0 = time.perf_counter()  # throttle until intermediate queue has room
                         self._wait_for_queue_capacity()
+                        queue_wait_ms = (time.perf_counter() - t0) * 1000
 
-                        self.send_next_layer(
+                        send_timings = self.send_next_layer(
                             self.intermediate_queue,
                             y,
                             {"enable": False}
                         )
+                        compress_ms  = send_timings["compress_ms"]
+                        serialize_ms = send_timings["serialize_ms"]
+                        publish_ms   = send_timings["publish_ms"]
 
                     # ===== ONLY EDGE =====
                     elif mode == "only_edge":
 
+                        t0 = time.perf_counter()  # full local inference
                         y = []
                         x, y = inference(model, input_image, y, 0, save_set)
+                        inference_ms = (time.perf_counter() - t0) * 1000
 
+                        t0 = time.perf_counter()  # NMS + mAP bookkeeping
                         results     = postprocess_yolo(x, conf_thres=0.25,  iou_thres=0.5)
                         map_results = postprocess_yolo(x, conf_thres=0.001, iou_thres=0.5)
                         self._update_map(results, batch_id, batch_size, map_results=map_results)
+                        postprocess_ms = (time.perf_counter() - t0) * 1000
 
                     # ===== SPLIT INFERENCE =====
                     else:
 
+                        t0 = time.perf_counter()  # edge-side partial inference up to the split point
                         y = []
                         x, y = inference(model, input_image, y, 0, save_set)
                         y[-1] = x
+                        inference_ms = (time.perf_counter() - t0) * 1000
 
                         y = {
                             "data": y,
@@ -375,20 +409,30 @@ class Scheduler:
                             "edge_start_time": edge_start_wall
                         }
 
+                        t0 = time.perf_counter()  # throttle until intermediate queue has room
                         self._wait_for_queue_capacity()
+                        queue_wait_ms = (time.perf_counter() - t0) * 1000
 
-                        self.send_next_layer(
+                        send_timings = self.send_next_layer(
                             self.intermediate_queue, y, compress
                         )
-                    batch_end = time.perf_counter()
+                        compress_ms  = send_timings["compress_ms"]
+                        serialize_ms = send_timings["serialize_ms"]
+                        publish_ms   = send_timings["publish_ms"]
+                    batch_end = time.perf_counter()  # end of this batch's "total" timing window
                     with open(self._timing_log_edge, "a") as _tf:
-                        print(str(time.time_ns()) + " output", file=_tf)
-                    latency_ms = (batch_end - batch_start) * 1000
-                    fps = batch_size / (batch_end - prev_batch_end) if prev_batch_end is not None else 0.0
-                    e2e_latency_ms = latency_ms if mode == "only_edge" else 0.0
+                        print(str(time.time_ns()) + " output", file=_tf)  # raw timestamp: batch finished processing
+                    latency_ms = (batch_end - batch_start) * 1000  # total time to process this batch (= sum of stages below + overhead)
+                    fps = batch_size / (batch_end - prev_batch_end) if prev_batch_end is not None else 0.0  # throughput since previous batch's end
+                    e2e_latency_ms = latency_ms if mode == "only_edge" else 0.0  # only_edge: no cloud hop, so e2e == local latency
+
+                    t0 = time.perf_counter()  # query current RAM usage
                     ram_mb = self.get_ram_mb()
+                    ram_ms = (time.perf_counter() - t0) * 1000
+
                     msg_size = self.size_message if self.size_message is not None else 0
 
+                    t0 = time.perf_counter()  # append row to metrics CSV
                     self.write_metrics(
                         mode=mode,
                         role="edge_sender" if mode == "only_cloud" else "edge",
@@ -402,9 +446,28 @@ class Scheduler:
                         e2e_latency_ms=e2e_latency_ms,
                         edge_start_time=edge_start_wall,
                     )
+                    write_csv_ms = (time.perf_counter() - t0) * 1000
+
+                    # Anything left over: dict/list bookkeeping, timing-log writes,
+                    # latency/fps math, etc. (queue_wait excluded — it's a deliberate
+                    # throttle, not work).
+                    measured_ms = (to_device_ms + inference_ms + postprocess_ms +
+                                    compress_ms + serialize_ms + publish_ms +
+                                    ram_ms + write_csv_ms)
+                    overhead_ms = latency_ms - queue_wait_ms - measured_ms
+
+                    # Log.print_with_color(
+                    #     f"[Timing] batch={batch_id} | to_device={to_device_ms:.2f}ms "
+                    #     f"inference={inference_ms:.2f}ms postprocess={postprocess_ms:.2f}ms "
+                    #     f"queue_wait={queue_wait_ms:.2f}ms compress={compress_ms:.2f}ms "
+                    #     f"serialize={serialize_ms:.2f}ms publish={publish_ms:.2f}ms "
+                    #     f"ram={ram_ms:.2f}ms write_csv={write_csv_ms:.2f}ms "
+                    #     f"overhead={overhead_ms:.2f}ms | total={latency_ms:.2f}ms",
+                    #     "header"
+                    # )
 
                     batch_id += 1
-                    prev_batch_end = batch_end
+                    prev_batch_end = batch_end  # remember end time so the next batch's fps can be computed
 
                     input_image = []
                     orig_images = []
@@ -415,7 +478,7 @@ class Scheduler:
             Log.print_with_color(f"[!] Video loop error at batch {batch_id}: {loop_err}", "red")
         finally:
             with open(self._timing_log_edge, "a") as _tf:
-                print(str(time.time_ns()) + " end", file=_tf)
+                print(str(time.time_ns()) + " end", file=_tf)  # raw timestamp: edge loop exited (video done or error)
             print(f'size message: {self.size_message} bytes.')
             cap.release()
             pbar.close()
@@ -477,15 +540,22 @@ class Scheduler:
         batch_id = 0
         send_notify = False
         _empty_poll_count = 0
-        prev_batch_end = None
+        prev_batch_end = None  # perf_counter() of previous batch's end, used to compute fps
         with open(self._timing_log_cloud, "w") as _tf:
-            print(str(time.time_ns()) + " start", file=_tf)
+            print(str(time.time_ns()) + " start", file=_tf)  # raw timestamp: cloud loop started
+
+        wait_start = time.perf_counter()  # start of "wait_network" timer for the first message
         while True:
             method_frame, header_frame, body = self.channel.basic_get(queue=self.intermediate_queue, auto_ack=True)
             if method_frame and body:
+                wait_ms = (time.perf_counter() - wait_start) * 1000  # time spent waiting for this message to arrive
                 _empty_poll_count = 0
                 received_message_size = len(body)
+
+                t0 = time.perf_counter()  # start of "total" timing window + deserialize
+                batch_start = t0
                 received_data = pickle.loads(body)
+                deserialize_ms = (time.perf_counter() - t0) * 1000
 
                 # Edge sent DONE sentinel — all frames have been transmitted
                 if received_data.get("action") == "DONE":
@@ -495,57 +565,80 @@ class Scheduler:
                                        "layer_id": self.layer_id, "message": "Finish training!"}
                         self.send_to_server(notify_data)
                         send_notify = True
+                    wait_start = time.perf_counter()
                     continue  # fall through to else branch next iteration to await server STOP
 
                 with open(self._timing_log_cloud, "a") as _tf:
-                    print(str(time.time_ns()) + " get input", file=_tf)
-                batch_start = time.perf_counter()
+                    print(str(time.time_ns()) + " get input", file=_tf)  # raw timestamp: batch message received & deserialized
                 y = received_data["data"]
                 edge_start_time = y.get("edge_start_time", time.time())
+
+                decompress_ms = 0.0  # only set in split-inference mode when compression is enabled
 
                 # ===== ONLY CLOUD =====
                 if mode == "only_cloud":
                     input_tensor = y["data"]
 
+                    t1 = time.perf_counter()  # stack frames + move batch to device
                     if isinstance(input_tensor, list):
                         input_tensor = torch.stack(input_tensor)
 
                     input_tensor = input_tensor.to(self.device)
+                    to_device_ms = (time.perf_counter() - t1) * 1000
 
+                    t1 = time.perf_counter()  # full-model inference
                     x, _ = inference(model, input_tensor, [], 0, save_set)
+                    inference_ms = (time.perf_counter() - t1) * 1000
                 # ===== SPLIT INFERENCE =====
                 else:
 
                     if compress["enable"]:
+                        t1 = time.perf_counter()  # decompress the received tensors
                         y["data"] = Decoder(y["data"], y["shape"])
 
                         y["data"] = [
                             torch.from_numpy(t) if t is not None else None
                             for t in y["data"]
                         ]
+                        decompress_ms = (time.perf_counter() - t1) * 1000
 
+                    t1 = time.perf_counter()  # move received tensors to device
                     y["data"] = [
                         t.to(self.device) if t is not None else None
                         for t in y["data"]
                     ]
+                    to_device_ms = (time.perf_counter() - t1) * 1000
 
                     list_output = y["data"]
 
                     x = list_output[-1]
+
+                    t1 = time.perf_counter()  # remaining-layers inference
                     x, _ = inference(model, x, list_output, splits, save_set)
+                    inference_ms = (time.perf_counter() - t1) * 1000
+
+                t1 = time.perf_counter()  # NMS post-processing
                 results     = postprocess_yolo(x, conf_thres=0.25,  iou_thres=0.5)
                 map_results = postprocess_yolo(x, conf_thres=0.001, iou_thres=0.5)
+                nms_ms = (time.perf_counter() - t1) * 1000
+
+                t1 = time.perf_counter()  # mAP bookkeeping + detection stream write
                 self._update_map(results, batch_id, batch_size, map_results=map_results)
+                map_update_ms = (time.perf_counter() - t1) * 1000
 
-                batch_end = time.perf_counter()
+                batch_end = time.perf_counter()  # end of this batch's "total" timing window
                 with open(self._timing_log_cloud, "a") as _tf:
-                    print(str(time.time_ns()) + " output", file=_tf)
-                cloud_end_wall = time.time()
-                latency_ms = (batch_end - batch_start) * 1000
-                fps = batch_size / (batch_end - prev_batch_end) if prev_batch_end is not None else 0.0
-                e2e_latency_ms = (cloud_end_wall - edge_start_time) * 1000
-                ram_mb = self.get_ram_mb()
+                    print(str(time.time_ns()) + " output", file=_tf)  # raw timestamp: batch finished processing
+                cloud_end_wall = time.time()  # wall-clock time, paired with edge_start_time for e2e latency
+                latency_ms = (batch_end - batch_start) * 1000  # total time to process this batch (= sum of stages below + overhead)
+                fps = batch_size / (batch_end - prev_batch_end) if prev_batch_end is not None else 0.0  # throughput since previous batch's end
+                e2e_latency_ms = (cloud_end_wall - edge_start_time) * 1000  # edge-send -> cloud-done round trip
 
+                t1 = time.perf_counter()  # query current RAM usage
+                ram_mb = self.get_ram_mb()
+                ram_ms = (time.perf_counter() - t1) * 1000
+
+                t1 = time.perf_counter()  # append row to metrics CSV
                 self.write_metrics(
                     mode=mode,
                     role="cloud",
@@ -559,9 +652,30 @@ class Scheduler:
                     e2e_latency_ms=e2e_latency_ms,
                     edge_start_time=edge_start_time,
                 )
+                write_csv_ms = (time.perf_counter() - t1) * 1000
+
+                # Anything left over: dict/list bookkeeping, timing-log writes,
+                # latency/fps math, etc.
+                measured_ms = (deserialize_ms + decompress_ms + to_device_ms + inference_ms +
+                                nms_ms + map_update_ms + ram_ms + write_csv_ms)
+                overhead_ms = latency_ms - measured_ms
+
+                # Print the full per-batch timing breakdown: network wait, deserialize,
+                # decompress, device transfer, inference, NMS, mAP update, RAM query,
+                # CSV write, leftover overhead, and overall total.
+                # Log.print_with_color(
+                #     f"[Timing] batch={batch_id} | wait_network={wait_ms:.2f}ms "
+                #     f"deserialize={deserialize_ms:.2f}ms decompress={decompress_ms:.2f}ms "
+                #     f"to_device={to_device_ms:.2f}ms inference={inference_ms:.2f}ms "
+                #     f"nms={nms_ms:.2f}ms map_update={map_update_ms:.2f}ms "
+                #     f"ram={ram_ms:.2f}ms write_csv={write_csv_ms:.2f}ms "
+                #     f"overhead={overhead_ms:.2f}ms | total={latency_ms:.2f}ms",
+                #     "header"
+                # )
 
                 batch_id += 1
-                prev_batch_end = batch_end
+                prev_batch_end = batch_end  # remember end time so the next batch's fps can be computed
+                wait_start = time.perf_counter()  # restart "wait_network" timer for the next message
 
                 pbar.update(batch_size)
 
@@ -589,7 +703,7 @@ class Scheduler:
                     time.sleep(0.5)
 
         with open(self._timing_log_cloud, "a") as _tf:
-            print(str(time.time_ns()) + " end", file=_tf)
+            print(str(time.time_ns()) + " end", file=_tf)  # raw timestamp: cloud loop exited (STOP received)
         try:
             cv2.destroyAllWindows()
         except Exception:
