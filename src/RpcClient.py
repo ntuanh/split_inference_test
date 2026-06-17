@@ -87,7 +87,7 @@ class RpcClient:
 
             Log.print_with_color(f"Start Inference", "green")
 
-            self.inference_func(client, data, num_layers, splits, batch_size, self.logger, compress, mode, queue_name, save_set)
+            self.inference_func(client, data, num_layers, splits, batch_size, self.logger, compress, mode, queue_name, save_set, len(layers))
 
             return False
         else:

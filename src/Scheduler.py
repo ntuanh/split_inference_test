@@ -355,7 +355,7 @@ class Scheduler:
                                    routing_key='rpc_queue',
                                    body=pickle.dumps(message))
 
-    def first_layer(self, model, data, batch_size, splits, logger, compress, mode="split", save_set=None):
+    def first_layer(self, model, data, batch_size, splits, logger, compress, mode="split", save_set=None, total_layers=None):
         orig_images = []
         input_image = []
         model.eval()
@@ -444,11 +444,25 @@ class Scheduler:
 
                     # ===== SPLIT INFERENCE =====
                     else:
+                        # splits<=0: edge has no layers to run at all (layers[:0] == []).
+                        edge_has_no_layers = (len(model) == 0)
+                        # splits>=total_layers: cloud's slice (layers[splits:]) is empty —
+                        # nothing downstream needs the skip-connection tensors anymore.
+                        cloud_has_no_layers = (total_layers is not None and splits >= total_layers)
 
                         t0 = time.perf_counter()  # edge-side partial inference up to the split point
-                        y = []
-                        x, y = inference(model, input_image, y, 0, save_set)
-                        y[-1] = x
+                        if edge_has_no_layers:
+                            # Nothing to run locally — forward the raw batch untouched.
+                            x = input_image
+                            y = [x]
+                        else:
+                            y = []
+                            x, y = inference(model, input_image, y, 0, save_set)
+                            y[-1] = x
+                            if cloud_has_no_layers:
+                                # Cloud has nothing left to compute — the skip-connection
+                                # tensors saved above would just be dead weight on the wire.
+                                y = [x]
                         inference_ms = (time.perf_counter() - t0) * 1000
 
                         y = {
@@ -676,10 +690,15 @@ class Scheduler:
 
                     list_output = y["data"]
 
-                    x = list_output[-1]
-
                     t1 = time.perf_counter()  # remaining-layers inference
-                    x, _ = inference(model, x, list_output, splits, save_set)
+                    if splits == 0:
+                        # Edge ran zero layers — list_output is just [raw_batch], not a
+                        # layer-indexed accumulator. Run the whole model from scratch,
+                        # same as only_cloud, but through the split-mode wire format.
+                        x, _ = inference(model, list_output[-1], [], 0, save_set)
+                    else:
+                        x = list_output[-1]
+                        x, _ = inference(model, x, list_output, splits, save_set)
                     inference_ms = (time.perf_counter() - t1) * 1000
 
                 t1 = time.perf_counter()  # NMS post-processing
@@ -957,7 +976,7 @@ class Scheduler:
         if self._det_results:
             self._write_detections_json()
 
-    def inference_func(self, model, data, num_layers, splits, batch_size, logger, compress, mode="split", queue_name="intermediate_queue", save_set=None):
+    def inference_func(self, model, data, num_layers, splits, batch_size, logger, compress, mode="split", queue_name="intermediate_queue", save_set=None, total_layers=None):
         try:
             os.remove("detections_stream.jsonl")
         except FileNotFoundError:
@@ -968,7 +987,7 @@ class Scheduler:
 
         if self.layer_id == 1:
             try:
-                self.first_layer(model, data, batch_size, splits, logger, compress, mode, save_set)
+                self.first_layer(model, data, batch_size, splits, logger, compress, mode, save_set, total_layers)
             except Exception as e:
                 Log.print_with_color(f"[!] Error during inference: {e} — saving metrics anyway.", "yellow")
             if mode == "only_edge":
