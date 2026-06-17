@@ -2,8 +2,8 @@ name: YOLO
 server:
   cut-layer: a # or b, c, d
   clients:
-    - 9 #edge
-    - 9 #cloud
+    - 1 #edge
+    - 1 #cloud
   model: yolo26n
   batch-size: 32
 experiment:
